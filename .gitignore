@@ -2,6 +2,10 @@ node_modules/
 dist/
 *.log
 
+# local SQLite file for dev/manual runs (deployment sets DATABASE_PATH to the
+# Fly volume instead; see server/src/index.ts)
+/data/
+
 # editor and OS junk
 .DS_Store
 ._*
