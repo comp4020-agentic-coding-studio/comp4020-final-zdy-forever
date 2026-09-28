@@ -22,3 +22,29 @@ export interface RegisterRequest {
   clientId: string;
   displayName: string;
 }
+
+export type RoomVisibility = "PUBLIC" | "PRIVATE";
+
+// code is only set for PRIVATE rooms, and is only ever returned to the
+// creator here — there's no room listing yet, and when one exists it must
+// never include a PRIVATE room or its code to anyone but its members.
+// maxUsers is fixed by course spec (not creator-configurable).
+export interface Room {
+  roomId: string;
+  name: string;
+  creatorAccountId: string;
+  visibility: RoomVisibility;
+  code: string | null;
+  maxUsers: number;
+  autoCloseEnabled: boolean;
+  createdAt: string;
+  lastMeaningfulActivityAt: string;
+  closed: boolean;
+}
+
+export interface CreateRoomRequest {
+  accountId: string;
+  name: string;
+  visibility: RoomVisibility;
+  autoCloseEnabled: boolean;
+}

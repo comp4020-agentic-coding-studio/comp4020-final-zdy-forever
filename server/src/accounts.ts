@@ -14,6 +14,13 @@ export function getAccountByClientId(db: DatabaseSync, clientId: string): Accoun
   return row ? rowToAccount(row) : undefined;
 }
 
+export function getAccountById(db: DatabaseSync, accountId: string): Account | undefined {
+  const row = db
+    .prepare("SELECT accountId, displayName, createdAt FROM accounts WHERE accountId = ?")
+    .get(accountId);
+  return row ? rowToAccount(row) : undefined;
+}
+
 // Registering is idempotent per clientId: a device that already has an
 // account gets that same account back (its original displayName included),
 // rather than minting a second accountId for the same browser. displayName

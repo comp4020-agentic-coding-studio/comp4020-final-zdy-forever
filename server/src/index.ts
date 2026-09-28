@@ -3,9 +3,16 @@ import { marked } from "marked";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Account, HealthResponse, RegisterRequest } from "../../shared/src/types.ts";
-import { registerAccount } from "./accounts.ts";
+import type {
+  Account,
+  CreateRoomRequest,
+  HealthResponse,
+  RegisterRequest,
+  Room,
+} from "../../shared/src/types.ts";
+import { getAccountById, registerAccount } from "./accounts.ts";
 import { openDatabase } from "./db.ts";
+import { createRoom } from "./rooms.ts";
 
 // Bundled (server/dist/index.js) and unbundled (server/src/index.ts) both
 // sit two levels below the repo root, so this resolves correctly either way.
@@ -43,6 +50,30 @@ app.post("/api/register", (req, res) => {
 
   const account: Account = registerAccount(db, clientId, displayName);
   res.json(account);
+});
+
+// Creates a room, owned by an already-registered account. No listing or join
+// endpoint exists yet, so a PRIVATE room's code is only ever handed back here,
+// to its own creator.
+app.post("/api/rooms", (req, res) => {
+  const body = req.body as Partial<CreateRoomRequest>;
+  const accountId = typeof body.accountId === "string" ? body.accountId.trim() : "";
+  const name = typeof body.name === "string" ? body.name.trim() : "";
+  const visibility = body.visibility;
+  const autoCloseEnabled = typeof body.autoCloseEnabled === "boolean" ? body.autoCloseEnabled : false;
+
+  if (!accountId || !name || (visibility !== "PUBLIC" && visibility !== "PRIVATE")) {
+    res.status(400).json({ error: "accountId, name, and visibility (PUBLIC or PRIVATE) are required" });
+    return;
+  }
+
+  if (!getAccountById(db, accountId)) {
+    res.status(400).json({ error: "unknown accountId" });
+    return;
+  }
+
+  const room: Room = createRoom(db, { accountId, name, visibility, autoCloseEnabled });
+  res.status(201).json(room);
 });
 
 // Renders README.md at /readme/, satisfying spec/invariants.test.ts (every
