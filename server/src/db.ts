@@ -195,5 +195,35 @@ export function openDatabase(dbPath: string): DatabaseSync {
     CREATE INDEX IF NOT EXISTS reactions_room_video ON reactions(roomId, videoId)
   `);
 
+  // Append-only structured observability log (see server/src/logging.ts) —
+  // every row is one meaningful action (ROOM_CREATE, VOTE_CAST, ...), never a
+  // full request/response dump, and deliberately carries no displayName,
+  // clientId or socketId (CLAUDE.md: "Do not log unnecessary personal
+  // information" / "Do not persist socket IDs or transient UI state").
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS logs (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      timestamp  TEXT NOT NULL,
+      action     TEXT NOT NULL,
+      result     TEXT NOT NULL,
+      roomId     TEXT,
+      accountId  TEXT,
+      proposalId TEXT,
+      playbackId TEXT,
+      revision   INTEGER,
+      detail     TEXT
+    )
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS logs_room_idx ON logs(roomId)
+  `);
+
+  // Supports logging.ts's pruneOldLogs, which deletes by timestamp on every
+  // logAction call (a 20-minute retention window — see logging.ts).
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS logs_timestamp_idx ON logs(timestamp)
+  `);
+
   return db;
 }

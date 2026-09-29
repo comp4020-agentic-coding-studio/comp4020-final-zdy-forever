@@ -13,6 +13,7 @@ import {
   type ProposalReference,
   type VoteChoice,
 } from "../../shared/src/voting.ts";
+import { logAction } from "./logging.ts";
 import { advanceToNextTrack, getCurrentPlayback, seekPlayback, setPlaybackStatus } from "./playback.ts";
 import {
   getQueueItemById,
@@ -295,6 +296,11 @@ export class ProposalManager {
     // "proposal create" is meaningful activity (CLAUDE.md's Rooms section),
     // regardless of proposal type.
     touchRoomActivity(db, roomId, nowMs);
+    logAction(
+      db,
+      { action: "PROPOSAL_CREATE", result: "ok", roomId, accountId: proposerAccountId, proposalId: proposal.proposalId, detail: payload.type },
+      nowMs,
+    );
 
     return { ok: true, proposal };
   }
@@ -325,6 +331,7 @@ export class ProposalManager {
     this.broadcast(io, roomId, result.proposal, false);
     // "vote" is meaningful activity (CLAUDE.md's Rooms section).
     touchRoomActivity(db, roomId, nowMs);
+    logAction(db, { action: "VOTE_CAST", result: "ok", roomId, accountId, proposalId, detail: choice }, nowMs);
     return { ok: true, proposal: result.proposal };
   }
 
@@ -358,6 +365,14 @@ export class ProposalManager {
     const next = advanceToNextTrack(db, roomId);
     io.to(roomId).emit("playback:update", next);
     if (next) broadcastReactionHistory(io, db, roomId, next.videoId);
+    logAction(db, {
+      action: "PLAYBACK_CHANGE",
+      result: "ok",
+      roomId,
+      playbackId: next?.playbackId,
+      revision: next?.revision,
+      detail: "track-ended",
+    });
   }
 
   // Cancels the room's pending resolution timer and marks its open proposal
@@ -399,9 +414,26 @@ export class ProposalManager {
     const resolved = resolveProposal(proposal, Date.now());
 
     if (!canExecute(resolved)) {
+      logAction(db, {
+        action: "PROPOSAL_FAIL",
+        result: "ok",
+        roomId,
+        proposalId: resolved.proposalId,
+        accountId: resolved.proposer,
+        detail: resolved.type,
+      });
       this.broadcast(io, roomId, resolved, false);
       return;
     }
+
+    logAction(db, {
+      action: "PROPOSAL_PASS",
+      result: "ok",
+      roomId,
+      proposalId: resolved.proposalId,
+      accountId: resolved.proposer,
+      detail: resolved.type,
+    });
 
     // A passed vote's execution touches the DB and can throw (a write
     // failure, a full disk, ...). This runs from a real setTimeout callback
@@ -414,6 +446,16 @@ export class ProposalManager {
       this.executePassedProposal(io, db, roomId, resolved);
     } catch (err) {
       console.error(`proposal ${resolved.proposalId} passed but failed to apply in room ${roomId}:`, err);
+      const action =
+        resolved.type === "REMOVE_QUEUE_ITEM" ? "QUEUE_REMOVE" : resolved.type === "REORDER_QUEUE" ? "QUEUE_REORDER" : "PLAYBACK_CHANGE";
+      logAction(db, {
+        action,
+        result: "error",
+        roomId,
+        proposalId: resolved.proposalId,
+        accountId: resolved.proposer,
+        detail: resolved.type,
+      });
       this.broadcast(io, roomId, resolved, false);
     }
   }
@@ -444,6 +486,15 @@ export class ProposalManager {
       // "successful shared playback action" is meaningful activity
       // (CLAUDE.md's Rooms section) — a successful SKIP unconditionally.
       touchRoomActivity(db, roomId);
+      logAction(db, {
+        action: "PLAYBACK_CHANGE",
+        result: "ok",
+        roomId,
+        proposalId: resolved.proposalId,
+        playbackId: next?.playbackId,
+        revision: next?.revision,
+        detail: "skip",
+      });
       return;
     }
 
@@ -459,6 +510,15 @@ export class ProposalManager {
         io.to(roomId).emit("playback:update", updated);
         // "successful shared playback action" is meaningful activity.
         touchRoomActivity(db, roomId);
+        logAction(db, {
+          action: "PLAYBACK_CHANGE",
+          result: "ok",
+          roomId,
+          proposalId: resolved.proposalId,
+          playbackId: updated.playbackId,
+          revision: updated.revision,
+          detail: "seek",
+        });
       }
       return;
     }
@@ -471,6 +531,14 @@ export class ProposalManager {
       this.broadcast(io, roomId, resolved, result.removed);
       if (result.removed) {
         io.to(roomId).emit("queue:itemRemoved", { queueItemId });
+        logAction(db, {
+          action: "QUEUE_REMOVE",
+          result: "ok",
+          roomId,
+          proposalId: resolved.proposalId,
+          revision: getQueueRevision(db, roomId),
+          detail: queueItemId,
+        });
       }
       return;
     }
@@ -487,6 +555,14 @@ export class ProposalManager {
         // "successful reorder" is meaningful activity (CLAUDE.md's Rooms
         // section) — only a genuine reorder, never a stale/no-op attempt.
         touchRoomActivity(db, roomId);
+        logAction(db, {
+          action: "QUEUE_REORDER",
+          result: "ok",
+          roomId,
+          proposalId: resolved.proposalId,
+          revision: getQueueRevision(db, roomId),
+          detail: queueItemId,
+        });
         // CLAUDE.md: "Consume one token only after a reorder vote passes and
         // a real reorder succeeds" — result.reordered === true is exactly
         // that condition (a stale/failed/no-op reorder never reaches here at
@@ -507,6 +583,15 @@ export class ProposalManager {
       io.to(roomId).emit("playback:update", updated);
       // "successful shared playback action" is meaningful activity.
       touchRoomActivity(db, roomId);
+      logAction(db, {
+        action: "PLAYBACK_CHANGE",
+        result: "ok",
+        roomId,
+        proposalId: resolved.proposalId,
+        playbackId: updated.playbackId,
+        revision: updated.revision,
+        detail: resolved.type,
+      });
     }
   }
 

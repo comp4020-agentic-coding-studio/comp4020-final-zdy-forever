@@ -1,6 +1,7 @@
 import { randomInt, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import type { CreateRoomRequest, JoinRoomResult, LobbyRoom, Room } from "../../shared/src/types.ts";
+import { logAction } from "./logging.ts";
 
 export class RoomNotFoundError extends Error {}
 export class RoomClosedError extends Error {}
@@ -41,6 +42,10 @@ function sweepInactiveRooms(db: DatabaseSync, nowMs: number): void {
   for (const candidate of candidates) {
     if (nowMs - Date.parse(candidate.lastMeaningfulActivityAt) >= AUTO_CLOSE_INACTIVITY_MS) {
       close.run(candidate.roomId);
+      // Fires exactly once per room: a swept-closed room drops out of the
+      // `closed = 0` candidate set immediately, so it can never be selected
+      // (and logged) again.
+      logAction(db, { action: "ROOM_AUTO_CLOSE", result: "ok", roomId: candidate.roomId }, nowMs);
     }
   }
 }
@@ -193,7 +198,8 @@ export function joinRoom(db: DatabaseSync, roomId: string, accountId: string, no
 }
 
 export function createRoom(db: DatabaseSync, request: CreateRoomRequest): Room {
-  const now = new Date().toISOString();
+  const nowMs = Date.now();
+  const now = new Date(nowMs).toISOString();
   const code = request.visibility === "PRIVATE" ? generateActiveRoomCode(db) : null;
 
   const room: Room = {
@@ -225,6 +231,8 @@ export function createRoom(db: DatabaseSync, request: CreateRoomRequest): Room {
     room.lastMeaningfulActivityAt,
     room.closed ? 1 : 0,
   );
+
+  logAction(db, { action: "ROOM_CREATE", result: "ok", roomId: room.roomId, accountId: room.creatorAccountId }, nowMs);
 
   return room;
 }

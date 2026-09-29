@@ -4,6 +4,7 @@ import type { ReactionEvent, RoomJoinPayload, RoomSnapshot } from "../../shared/
 import { computeExpectedPositionMs, toAnchor } from "../../shared/src/playbackSync.ts";
 import type { VoteChoice } from "../../shared/src/voting.ts";
 import { getAccountByClientId } from "./accounts.ts";
+import { logAction } from "./logging.ts";
 import { getCurrentPlayback } from "./playback.ts";
 import { PresenceStore } from "./presence.ts";
 import { ProposalManager } from "./proposals.ts";
@@ -77,6 +78,7 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
     const result = presence.leave(roomId, socket.id);
     if (result?.becameAbsent) {
       io.to(roomId).emit("presence:leave", { accountId: result.accountId });
+      logAction(db, { action: "ROOM_LEAVE", result: "ok", roomId, accountId: result.accountId });
     }
   }
 
@@ -99,6 +101,9 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
         room = joinRoom(db, roomId, data.accountId).room;
       } catch (err) {
         if (err instanceof RoomNotFoundError || err instanceof RoomClosedError || err instanceof RoomFullError) {
+          const reason =
+            err instanceof RoomNotFoundError ? "room-not-found" : err instanceof RoomClosedError ? "room-closed" : "room-full";
+          logAction(db, { action: "ROOM_JOIN", result: reason, roomId, accountId: data.accountId });
           socket.emit("room:joinError", { error: err.message });
           return;
         }
@@ -108,10 +113,15 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
       socket.join(roomId);
       data.roomId = roomId;
 
-      const { becamePresent } = presence.join(roomId, socket.id, {
+      const { becamePresent, returning } = presence.join(roomId, socket.id, {
         accountId: data.accountId,
         displayName: data.displayName,
       });
+      // A returning account (this process has already seen it present in
+      // this room before) is logged as RECONNECT rather than ROOM_JOIN — see
+      // PresenceStore.join's doc comment for why this also covers a late
+      // join, not only a true post-disconnect reconnect.
+      logAction(db, { action: returning ? "RECONNECT" : "ROOM_JOIN", result: "ok", roomId, accountId: data.accountId });
 
       const playback = getCurrentPlayback(db, roomId);
       const snapshot: RoomSnapshot = {
@@ -247,6 +257,13 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
       });
       const event: ReactionEvent = { kind: "LIVE", reaction };
       io.to(data.roomId).emit("reaction:new", event);
+      logAction(db, {
+        action: "REACTION_CREATE",
+        result: "ok",
+        roomId: data.roomId,
+        accountId: data.accountId,
+        playbackId: playback.playbackId,
+      });
     });
 
     socket.on("disconnect", () => {
