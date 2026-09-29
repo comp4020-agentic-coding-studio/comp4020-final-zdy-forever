@@ -10,7 +10,7 @@ import { advanceToNextTrack, ensureCurrentTrack, getCurrentPlayback, setPlayback
 import { ProposalManager, type ProposalBroadcast } from "./proposals.ts";
 import { addTrack, getQueueRevision, listQueue, removeQueueItem } from "./queue.ts";
 import { consumeReorderToken, getReorderTokenBalance } from "./reorderTokenStore.ts";
-import { createRoom } from "./rooms.ts";
+import { createRoom, getRoomById } from "./rooms.ts";
 
 // A minimal io.Server stand-in: ProposalManager only ever calls
 // io.to(roomId).emit(event, payload), so a fake this thin is enough to
@@ -91,7 +91,7 @@ describe("ProposalManager", () => {
 
     // Alice (proposer) auto-voted YES; Bob provides the second non-abstain
     // vote needed to clear the minimum-2 threshold.
-    const voted = manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+    const voted = manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "YES");
     expect(voted.ok).toBe(true);
 
     await sleep(60);
@@ -138,7 +138,7 @@ describe("ProposalManager", () => {
     expect(requested.ok).toBe(true);
     if (!requested.ok) return;
 
-    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "NO");
+    manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "NO");
 
     await sleep(60);
 
@@ -159,9 +159,9 @@ describe("ProposalManager", () => {
     expect(requested.ok).toBe(true);
     if (!requested.ok) return;
 
-    const first = manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+    const first = manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "YES");
     expect(first.ok).toBe(true);
-    const second = manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "NO");
+    const second = manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "NO");
     expect(second.ok).toBe(true);
     if (!second.ok) return;
 
@@ -211,7 +211,7 @@ describe("ProposalManager", () => {
     expect(requested.ok).toBe(true);
     if (!requested.ok) return;
 
-    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+    manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "YES");
 
     // Something else (e.g. a track transition) rebases playback state before
     // the vote closes, invalidating the proposal's captured reference.
@@ -267,7 +267,7 @@ describe("ProposalManager", () => {
     });
     expect(requested.ok).toBe(true);
     if (!requested.ok) return;
-    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+    manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "YES");
     void carol;
 
     await sleep(60);
@@ -289,7 +289,7 @@ describe("ProposalManager", () => {
 
     await sleep(60);
 
-    const lateVote = manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+    const lateVote = manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "YES");
     expect(lateVote.ok).toBe(false);
   });
 
@@ -297,7 +297,7 @@ describe("ProposalManager", () => {
     const manager = new ProposalManager();
     const { io } = fakeIo();
 
-    const result = manager.castVote(io, roomId, "not-a-real-id", bob.accountId, "YES");
+    const result = manager.castVote(io, db, roomId, "not-a-real-id", bob.accountId, "YES");
     expect(result.ok).toBe(false);
   });
 
@@ -370,7 +370,7 @@ describe("ProposalManager", () => {
     });
     expect(requested.ok).toBe(true);
     if (!requested.ok) return;
-    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+    manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "YES");
 
     await sleep(60);
 
@@ -405,7 +405,7 @@ describe("ProposalManager", () => {
     });
     expect(requested.ok).toBe(true);
     if (!requested.ok) return;
-    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+    manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "YES");
 
     const movedToB = advanceToNextTrack(db, roomId);
 
@@ -501,7 +501,7 @@ describe("ProposalManager", () => {
     });
     expect(requested.ok).toBe(true);
     if (!requested.ok) return;
-    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+    manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "YES");
 
     await addTrack(db, roomId, bob.accountId, SONG_ID, { resolveMetadata }); // C, added mid-vote
 
@@ -522,7 +522,7 @@ describe("ProposalManager", () => {
     });
     expect(requested.ok).toBe(true);
     if (!requested.ok) return;
-    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+    manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "YES");
 
     await sleep(60);
 
@@ -575,7 +575,7 @@ describe("ProposalManager", () => {
     });
     expect(requested.ok).toBe(true);
     if (!requested.ok) return;
-    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+    manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "YES");
 
     // Something else rebases playback (bumping revision) while the vote is
     // still open — by resolution time the proposal's reference is stale.
@@ -604,7 +604,7 @@ describe("ProposalManager", () => {
     });
     expect(requested.ok).toBe(true);
     if (!requested.ok) return;
-    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+    manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "YES");
 
     await sleep(60);
 
@@ -665,7 +665,7 @@ describe("ProposalManager", () => {
     });
     expect(requested.ok).toBe(true);
     if (!requested.ok) return;
-    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+    manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "YES");
 
     // Something else (here, a second removal applied directly) bumps
     // queueRevision while the vote on b is still open.
@@ -692,7 +692,7 @@ describe("ProposalManager", () => {
     });
     expect(requested.ok).toBe(true);
     if (!requested.ok) return;
-    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+    manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "YES");
 
     // b becomes the current track mid-vote (a SKIP passed elsewhere) — this
     // never bumps queueRevision, so the REMOVE_QUEUE_ITEM proposal's
@@ -721,7 +721,7 @@ describe("ProposalManager", () => {
     });
     expect(requested.ok).toBe(true);
     if (!requested.ok) return;
-    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+    manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "YES");
 
     await addTrack(db, roomId, carol.accountId, SONG_ID, { resolveMetadata }); // C, added mid-vote
 
@@ -746,7 +746,7 @@ describe("ProposalManager", () => {
     });
     expect(requested.ok).toBe(true);
     if (!requested.ok) return;
-    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+    manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "YES");
 
     manager.handleTrackEnded(io, db, roomId, before.playbackId);
 
@@ -774,7 +774,7 @@ describe("ProposalManager", () => {
     });
     expect(requested.ok).toBe(true);
     if (!requested.ok) return;
-    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+    manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "YES");
 
     await sleep(60);
 
@@ -848,7 +848,7 @@ describe("ProposalManager", () => {
     });
     expect(requested.ok).toBe(true);
     if (!requested.ok) return;
-    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+    manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "YES");
 
     // Something else (here, an unrelated removal) bumps queueRevision while
     // the reorder vote on b/c is still open.
@@ -967,5 +967,128 @@ describe("ProposalManager timer bookkeeping", () => {
       db.close();
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// CLAUDE.md's Rooms section lists "proposal create," "vote," "successful
+// shared playback action" and "successful reorder" as meaningful activity —
+// each must bump the room's lastMeaningfulActivityAt (the timestamp
+// server/src/rooms.ts's auto-close sweep reads), so an auto-close-enabled
+// room never closes while votes keep happening in it.
+describe("ProposalManager touches room activity", () => {
+  let dir: string;
+  let db: DatabaseSync;
+  let roomId: string;
+  let alice: Account;
+  let bob: Account;
+  let firstQueueItemId: string;
+
+  const SONG: YoutubeVideoMetadata = {
+    videoId: SONG_ID,
+    title: "Song A",
+    channelTitle: "Channel A",
+    thumbnailUrl: "https://example.com/a.jpg",
+    embeddable: true,
+  };
+  const resolveMetadata = async (videoId: string): Promise<YoutubeVideoMetadata | null> =>
+    videoId === SONG_ID ? SONG : null;
+  const STALE = "2000-01-01T00:00:00.000Z";
+
+  beforeEach(async () => {
+    dir = mkdtempSync(path.join(tmpdir(), "echo-room-proposals-activity-"));
+    db = openDatabase(path.join(dir, "echo-room.sqlite"));
+    alice = registerAccount(db, "client-alice", "Alice");
+    bob = registerAccount(db, "client-bob", "Bob");
+    roomId = createRoom(db, { accountId: alice.accountId, name: "Room", visibility: "PUBLIC", autoCloseEnabled: true })
+      .roomId;
+
+    const item = await addTrack(db, roomId, alice.accountId, SONG_ID, { resolveMetadata });
+    ensureCurrentTrack(db, roomId, item.queueItemId);
+    firstQueueItemId = item.queueItemId;
+  });
+
+  afterEach(() => {
+    try {
+      db.close();
+    } catch {
+      // already closed
+    }
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function markStale(): void {
+    db.prepare("UPDATE rooms SET lastMeaningfulActivityAt = ? WHERE roomId = ?").run(STALE, roomId);
+  }
+
+  it("proposal create touches activity", () => {
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+    markStale();
+
+    manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "PAUSE", { votingWindowMs: 10_000 });
+
+    expect(getRoomById(db, roomId)!.lastMeaningfulActivityAt).not.toBe(STALE);
+    manager.dispose();
+  });
+
+  it("casting a vote touches activity", () => {
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+    const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "PAUSE", {
+      votingWindowMs: 10_000,
+    });
+    expect(requested.ok).toBe(true);
+    if (!requested.ok) return;
+    markStale();
+
+    manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+
+    expect(getRoomById(db, roomId)!.lastMeaningfulActivityAt).not.toBe(STALE);
+    manager.dispose();
+  });
+
+  it("a successful shared playback action (PAUSE passing) touches activity", async () => {
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+    const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "PAUSE", {
+      votingWindowMs: 20,
+    });
+    expect(requested.ok).toBe(true);
+    if (!requested.ok) return;
+    manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+    markStale();
+
+    await sleep(60);
+
+    expect(getCurrentPlayback(db, roomId)?.status).toBe("PAUSED");
+    expect(getRoomById(db, roomId)!.lastMeaningfulActivityAt).not.toBe(STALE);
+  });
+
+  it("a successful reorder touches activity", async () => {
+    const second = await addTrack(db, roomId, alice.accountId, "bbbbbbbbbbb", {
+      resolveMetadata: async (videoId) => ({
+        videoId,
+        title: "Song B",
+        channelTitle: "Channel B",
+        thumbnailUrl: "https://example.com/b.jpg",
+        embeddable: true,
+      }),
+    });
+
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+    const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "REORDER_QUEUE", {
+      votingWindowMs: 20,
+      queueItemId: second.queueItemId,
+      beforeQueueItemId: firstQueueItemId,
+    });
+    expect(requested.ok).toBe(true);
+    if (!requested.ok) return;
+    manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+    markStale();
+
+    await sleep(60);
+
+    expect(getRoomById(db, roomId)!.lastMeaningfulActivityAt).not.toBe(STALE);
   });
 });

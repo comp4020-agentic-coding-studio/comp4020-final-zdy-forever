@@ -7,7 +7,7 @@ import type { Account } from "../../shared/src/types.ts";
 import { registerAccount } from "./accounts.ts";
 import { openDatabase } from "./db.ts";
 import { isReactionEmoji, listReactionsForVideo, recordReaction } from "./reactions.ts";
-import { createRoom } from "./rooms.ts";
+import { createRoom, getRoomById } from "./rooms.ts";
 
 describe("isReactionEmoji", () => {
   it("accepts exactly the fixed set", () => {
@@ -79,6 +79,22 @@ describe("reactions (DB-backed)", () => {
         positionMs: 42_000,
         createdAt: new Date(T0).toISOString(),
       });
+    });
+
+    // "reaction" is meaningful activity (CLAUDE.md's Rooms section).
+    it("bumps the room's lastMeaningfulActivityAt to the reaction's nowMs", () => {
+      recordReaction(db, {
+        roomId,
+        videoId: "abc123",
+        playbackId: "playback-1",
+        accountId: alice.accountId,
+        displayName: "Alice",
+        reaction: "🔥",
+        positionMs: 1_000,
+        nowMs: T0,
+      });
+
+      expect(getRoomById(db, roomId, T0)!.lastMeaningfulActivityAt).toBe(new Date(T0).toISOString());
     });
 
     it("a recorded reaction is immediately visible via listReactionsForVideo", () => {

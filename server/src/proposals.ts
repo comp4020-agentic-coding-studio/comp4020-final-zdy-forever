@@ -23,6 +23,7 @@ import {
 } from "./queue.ts";
 import { broadcastReactionHistory } from "./reactions.ts";
 import { consumeReorderToken, getReorderTokenBalance } from "./reorderTokenStore.ts";
+import { touchRoomActivity } from "./rooms.ts";
 
 // Wires the pure voting engine (shared/src/voting.ts) to real playback/queue
 // state and real-time broadcast for PLAY/PAUSE/SKIP/SEEK/REMOVE_QUEUE_ITEM/
@@ -291,16 +292,28 @@ export class ProposalManager {
     timer.unref?.();
     this.timers.set(roomId, timer);
 
+    // "proposal create" is meaningful activity (CLAUDE.md's Rooms section),
+    // regardless of proposal type.
+    touchRoomActivity(db, roomId, nowMs);
+
     return { ok: true, proposal };
   }
 
-  castVote(io: Server, roomId: string, proposalId: string, accountId: string, choice: VoteChoice): ProposalOutcome {
+  castVote(
+    io: Server,
+    db: DatabaseSync,
+    roomId: string,
+    proposalId: string,
+    accountId: string,
+    choice: VoteChoice,
+  ): ProposalOutcome {
     const proposal = this.active.get(roomId);
     if (!proposal || proposal.proposalId !== proposalId) {
       return { ok: false, error: "no matching active proposal in this room" };
     }
 
-    const result = engineCastVote(proposal, accountId, choice, Date.now());
+    const nowMs = Date.now();
+    const result = engineCastVote(proposal, accountId, choice, nowMs);
     if (!result.ok) {
       return {
         ok: false,
@@ -310,6 +323,8 @@ export class ProposalManager {
 
     this.active.set(roomId, result.proposal);
     this.broadcast(io, roomId, result.proposal, false);
+    // "vote" is meaningful activity (CLAUDE.md's Rooms section).
+    touchRoomActivity(db, roomId, nowMs);
     return { ok: true, proposal: result.proposal };
   }
 
@@ -410,6 +425,9 @@ export class ProposalManager {
       this.broadcast(io, roomId, resolved, true);
       io.to(roomId).emit("playback:update", next);
       if (next) broadcastReactionHistory(io, db, roomId, next.videoId);
+      // "successful shared playback action" is meaningful activity
+      // (CLAUDE.md's Rooms section) — a successful SKIP unconditionally.
+      touchRoomActivity(db, roomId);
       return;
     }
 
@@ -423,6 +441,8 @@ export class ProposalManager {
       this.broadcast(io, roomId, resolved, updated !== null);
       if (updated) {
         io.to(roomId).emit("playback:update", updated);
+        // "successful shared playback action" is meaningful activity.
+        touchRoomActivity(db, roomId);
       }
       return;
     }
@@ -448,6 +468,9 @@ export class ProposalManager {
       this.broadcast(io, roomId, resolved, result.reordered);
       if (result.reordered) {
         io.to(roomId).emit("queue:reordered", { queue: result.queue });
+        // "successful reorder" is meaningful activity (CLAUDE.md's Rooms
+        // section) — only a genuine reorder, never a stale/no-op attempt.
+        touchRoomActivity(db, roomId);
         // CLAUDE.md: "Consume one token only after a reorder vote passes and
         // a real reorder succeeds" — result.reordered === true is exactly
         // that condition (a stale/failed/no-op reorder never reaches here at
@@ -466,6 +489,8 @@ export class ProposalManager {
     this.broadcast(io, roomId, resolved, updated !== null);
     if (updated) {
       io.to(roomId).emit("playback:update", updated);
+      // "successful shared playback action" is meaningful activity.
+      touchRoomActivity(db, roomId);
     }
   }
 

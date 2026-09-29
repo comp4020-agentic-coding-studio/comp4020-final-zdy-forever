@@ -5,7 +5,7 @@ import type { DatabaseSync } from "node:sqlite";
 import type { YoutubeVideoMetadata } from "../../shared/src/types.ts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { registerAccount } from "./accounts.ts";
-import { createRoom } from "./rooms.ts";
+import { createRoom, getRoomById } from "./rooms.ts";
 import { openDatabase } from "./db.ts";
 import { getNextTrack } from "./playback.ts";
 import { addTrack, InvalidTrackError, listQueue, planReorder, previewReorderQueue, reorderQueueItem } from "./queue.ts";
@@ -92,6 +92,20 @@ describe("queue", () => {
     expect(item.addedAt).toBeTruthy();
 
     expect(listQueue(db, roomId)).toEqual([item]);
+  });
+
+  // "track add" is meaningful activity (CLAUDE.md's Rooms section) — a room
+  // with auto-close enabled must not close while tracks keep getting added.
+  it("bumps the room's lastMeaningfulActivityAt on a successful add", async () => {
+    const before = getRoomById(db, roomId)!.lastMeaningfulActivityAt;
+    db.prepare("UPDATE rooms SET lastMeaningfulActivityAt = '2000-01-01T00:00:00.000Z' WHERE roomId = ?").run(roomId);
+    expect(getRoomById(db, roomId)!.lastMeaningfulActivityAt).not.toBe(before);
+
+    const resolveMetadata = fakeMetadataFor({ [SONG_A.videoId]: SONG_A });
+    await addTrack(db, roomId, accountId, SONG_A.videoId, { resolveMetadata });
+
+    const after = getRoomById(db, roomId)!.lastMeaningfulActivityAt;
+    expect(Date.parse(after)).toBeGreaterThan(Date.parse("2000-01-01T00:00:00.000Z"));
   });
 
   it("resolves a pasted URL to its canonical videoId rather than trusting client input", async () => {

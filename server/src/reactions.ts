@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import type { Server } from "socket.io";
 import { REACTION_EMOJIS, type Reaction, type ReactionEmoji } from "../../shared/src/types.ts";
+import { touchRoomActivity } from "./rooms.ts";
 
 export function isReactionEmoji(value: unknown): value is ReactionEmoji {
   return typeof value === "string" && (REACTION_EMOJIS as readonly string[]).includes(value);
@@ -41,6 +42,9 @@ export function recordReaction(db: DatabaseSync, params: RecordReactionParams): 
     params.positionMs,
     createdAt,
   );
+
+  // "reaction" is meaningful activity (CLAUDE.md's Rooms section).
+  touchRoomActivity(db, params.roomId, params.nowMs);
 
   return {
     reactionId,

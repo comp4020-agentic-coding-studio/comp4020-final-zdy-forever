@@ -6,17 +6,20 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { registerAccount } from "./accounts.ts";
 import { openDatabase } from "./db.ts";
 import {
+  AUTO_CLOSE_INACTIVITY_MS,
   createRoom,
   generateActiveRoomCode,
   getActiveRoomByCode,
   getOccupancy,
   getRoomById,
+  isAutoCloseDue,
   joinRoom,
   listPublicLobby,
   MAX_ROOM_USERS,
   RoomClosedError,
   RoomFullError,
   RoomNotFoundError,
+  touchRoomActivity,
 } from "./rooms.ts";
 
 describe("rooms", () => {
@@ -302,6 +305,231 @@ describe("rooms", () => {
       occupancy: 1,
       capacity: MAX_ROOM_USERS,
       joinable: true,
+    });
+  });
+
+  // CLAUDE.md's Rooms section: "auto close after 2 hours of inactivity,"
+  // restart-safe, using timestamps rather than in-memory timers — every test
+  // here drives the clock with an explicit nowMs rather than a real timer.
+  describe("auto-close inactivity", () => {
+    const T0 = 1_700_000_000_000;
+
+    it("isAutoCloseDue is false before the window elapses and true once it has", () => {
+      const room = createRoom(db, {
+        accountId: creatorAccountId,
+        name: "Idle room",
+        visibility: "PUBLIC",
+        autoCloseEnabled: true,
+      });
+      const created = Date.parse(room.createdAt);
+
+      expect(isAutoCloseDue(room, created + AUTO_CLOSE_INACTIVITY_MS - 1)).toBe(false);
+      expect(isAutoCloseDue(room, created + AUTO_CLOSE_INACTIVITY_MS)).toBe(true);
+      expect(isAutoCloseDue(room, created + AUTO_CLOSE_INACTIVITY_MS + 1_000_000)).toBe(true);
+    });
+
+    it("isAutoCloseDue is always false when autoCloseEnabled is off, no matter how stale", () => {
+      const room = createRoom(db, {
+        accountId: creatorAccountId,
+        name: "Forever room",
+        visibility: "PUBLIC",
+        autoCloseEnabled: false,
+      });
+      const created = Date.parse(room.createdAt);
+
+      expect(isAutoCloseDue(room, created + AUTO_CLOSE_INACTIVITY_MS * 100)).toBe(false);
+    });
+
+    it("isAutoCloseDue is always false for a room already marked closed", () => {
+      const room = createRoom(db, {
+        accountId: creatorAccountId,
+        name: "Already closed",
+        visibility: "PUBLIC",
+        autoCloseEnabled: true,
+      });
+      const created = Date.parse(room.createdAt);
+
+      expect(isAutoCloseDue({ ...room, closed: true }, created + AUTO_CLOSE_INACTIVITY_MS * 100)).toBe(false);
+    });
+
+    it("getRoomById persists closure once the inactivity window has elapsed, purely from the stored timestamp", () => {
+      const room = createRoom(db, {
+        accountId: creatorAccountId,
+        name: "Auto-close room",
+        visibility: "PUBLIC",
+        autoCloseEnabled: true,
+      });
+      db.prepare("UPDATE rooms SET lastMeaningfulActivityAt = ? WHERE roomId = ?").run(
+        new Date(T0).toISOString(),
+        room.roomId,
+      );
+
+      // Still within the window: not yet closed.
+      const stillOpen = getRoomById(db, room.roomId, T0 + AUTO_CLOSE_INACTIVITY_MS - 1);
+      expect(stillOpen?.closed).toBe(false);
+
+      // The window has elapsed: the very first read after expiry both
+      // reports and persists the closure.
+      const nowClosed = getRoomById(db, room.roomId, T0 + AUTO_CLOSE_INACTIVITY_MS);
+      expect(nowClosed?.closed).toBe(true);
+
+      // Persisted, not just returned: a later read with no sweep needed still
+      // reports closed, and a raw row confirms the DB column itself flipped.
+      const raw = db.prepare("SELECT closed FROM rooms WHERE roomId = ?").get(room.roomId) as { closed: number };
+      expect(raw.closed).toBe(1);
+    });
+
+    it("a room with autoCloseEnabled off is never swept closed, no matter how old its activity timestamp", () => {
+      const room = createRoom(db, {
+        accountId: creatorAccountId,
+        name: "Never auto-closes",
+        visibility: "PUBLIC",
+        autoCloseEnabled: false,
+      });
+      db.prepare("UPDATE rooms SET lastMeaningfulActivityAt = ? WHERE roomId = ?").run(
+        new Date(T0).toISOString(),
+        room.roomId,
+      );
+
+      const found = getRoomById(db, room.roomId, T0 + AUTO_CLOSE_INACTIVITY_MS * 100);
+      expect(found?.closed).toBe(false);
+    });
+
+    it("touchRoomActivity delays closure by resetting the inactivity window", () => {
+      const room = createRoom(db, {
+        accountId: creatorAccountId,
+        name: "Kept alive",
+        visibility: "PUBLIC",
+        autoCloseEnabled: true,
+      });
+      db.prepare("UPDATE rooms SET lastMeaningfulActivityAt = ? WHERE roomId = ?").run(
+        new Date(T0).toISOString(),
+        room.roomId,
+      );
+
+      // Meaningful activity lands just before the original window would have
+      // expired.
+      const activityAt = T0 + AUTO_CLOSE_INACTIVITY_MS - 1_000;
+      touchRoomActivity(db, room.roomId, activityAt);
+
+      // The original expiry instant no longer closes the room...
+      const stillOpen = getRoomById(db, room.roomId, T0 + AUTO_CLOSE_INACTIVITY_MS);
+      expect(stillOpen?.closed).toBe(false);
+
+      // ...but a full fresh window after the new activity does.
+      const nowClosed = getRoomById(db, room.roomId, activityAt + AUTO_CLOSE_INACTIVITY_MS);
+      expect(nowClosed?.closed).toBe(true);
+    });
+
+    it("getActiveRoomByCode sweeps and then correctly reports no active match for an auto-closed code", () => {
+      const room = createRoom(db, {
+        accountId: creatorAccountId,
+        name: "Private idle room",
+        visibility: "PRIVATE",
+        autoCloseEnabled: true,
+      });
+      const code = room.code as string;
+      db.prepare("UPDATE rooms SET lastMeaningfulActivityAt = ? WHERE roomId = ?").run(
+        new Date(T0).toISOString(),
+        room.roomId,
+      );
+
+      expect(getActiveRoomByCode(db, code, T0 + AUTO_CLOSE_INACTIVITY_MS)).toBeUndefined();
+    });
+
+    it("generateActiveRoomCode treats an auto-closed room's code as free", () => {
+      const stale = createRoom(db, {
+        accountId: creatorAccountId,
+        name: "Stale code holder",
+        visibility: "PRIVATE",
+        autoCloseEnabled: true,
+      });
+      db.prepare("UPDATE rooms SET lastMeaningfulActivityAt = ? WHERE roomId = ?").run(
+        new Date(T0).toISOString(),
+        stale.roomId,
+      );
+
+      const code = generateActiveRoomCode(db, () => stale.code as string, T0 + AUTO_CLOSE_INACTIVITY_MS);
+      expect(code).toBe(stale.code);
+    });
+
+    it("listPublicLobby excludes a room the moment its inactivity window elapses", () => {
+      const room = createRoom(db, {
+        accountId: creatorAccountId,
+        name: "Fading room",
+        visibility: "PUBLIC",
+        autoCloseEnabled: true,
+      });
+      db.prepare("UPDATE rooms SET lastMeaningfulActivityAt = ? WHERE roomId = ?").run(
+        new Date(T0).toISOString(),
+        room.roomId,
+      );
+
+      expect(listPublicLobby(db, T0 + AUTO_CLOSE_INACTIVITY_MS - 1)).toHaveLength(1);
+      expect(listPublicLobby(db, T0 + AUTO_CLOSE_INACTIVITY_MS)).toHaveLength(0);
+    });
+
+    it("joinRoom rejects an auto-closed room with RoomClosedError, exactly like a manually closed room", () => {
+      const room = createRoom(db, {
+        accountId: creatorAccountId,
+        name: "Went quiet",
+        visibility: "PUBLIC",
+        autoCloseEnabled: true,
+      });
+      db.prepare("UPDATE rooms SET lastMeaningfulActivityAt = ? WHERE roomId = ?").run(
+        new Date(T0).toISOString(),
+        room.roomId,
+      );
+      const joinerId = registerAccount(db, "client-late-joiner", "Late joiner").accountId;
+
+      expect(() => joinRoom(db, room.roomId, joinerId, T0 + AUTO_CLOSE_INACTIVITY_MS)).toThrow(RoomClosedError);
+    });
+
+    it("auto-close is restart-safe: a server restart between the last activity and now still closes the room on first read", () => {
+      const room = createRoom(db, {
+        accountId: creatorAccountId,
+        name: "Restart room",
+        visibility: "PUBLIC",
+        autoCloseEnabled: true,
+      });
+      db.prepare("UPDATE rooms SET lastMeaningfulActivityAt = ? WHERE roomId = ?").run(
+        new Date(T0).toISOString(),
+        room.roomId,
+      );
+
+      // Simulate the process restarting: close this handle and reopen the
+      // same file, with nothing in memory carried over.
+      db.close();
+      const reopened = openDatabase(dbPath);
+
+      const found = getRoomById(reopened, room.roomId, T0 + AUTO_CLOSE_INACTIVITY_MS + 60_000);
+      expect(found?.closed).toBe(true);
+
+      db = reopened;
+    });
+
+    it("auto-closing a room never deletes its historical persisted data — only the closed flag changes", () => {
+      const room = createRoom(db, {
+        accountId: creatorAccountId,
+        name: "Rich history room",
+        visibility: "PUBLIC",
+        autoCloseEnabled: true,
+      });
+      const joinerId = registerAccount(db, "client-history-joiner", "History joiner").accountId;
+      joinRoom(db, room.roomId, joinerId, T0);
+      db.prepare("UPDATE rooms SET lastMeaningfulActivityAt = ? WHERE roomId = ?").run(
+        new Date(T0).toISOString(),
+        room.roomId,
+      );
+
+      const closed = getRoomById(db, room.roomId, T0 + AUTO_CLOSE_INACTIVITY_MS);
+      expect(closed?.closed).toBe(true);
+
+      // The room row itself is still there (only closed flipped), and the
+      // participant row from before closure is untouched.
+      const rawRoom = db.prepare("SELECT roomId, name FROM rooms WHERE roomId = ?").get(room.roomId);
+      expect(rawRoom).toEqual({ roomId: room.roomId, name: "Rich history room" });
+      expect(getOccupancy(db, room.roomId)).toBe(1);
     });
   });
 });

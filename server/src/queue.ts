@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import type { QueueItem, YoutubeVideoMetadata } from "../../shared/src/types.ts";
 import { parseYouTubeVideoId } from "../../shared/src/youtube.ts";
+import { touchRoomActivity } from "./rooms.ts";
 import { getVideoMetadata as defaultGetVideoMetadata } from "./youtube.ts";
 
 export class InvalidTrackError extends Error {}
@@ -237,6 +238,9 @@ export async function addTrack(
     item.addedAt,
     position,
   );
+
+  // "track add" is meaningful activity (CLAUDE.md's Rooms section).
+  touchRoomActivity(db, roomId);
 
   return item;
 }

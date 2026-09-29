@@ -190,7 +190,7 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
         socket.emit("proposal:voteError", { error: "proposalId and a YES/NO choice are required" });
         return;
       }
-      const result = proposals.castVote(io, data.roomId, proposalId, data.accountId, choice as VoteChoice);
+      const result = proposals.castVote(io, db, data.roomId, proposalId, data.accountId, choice as VoteChoice);
       if (!result.ok) {
         socket.emit("proposal:voteError", { error: result.error });
       }

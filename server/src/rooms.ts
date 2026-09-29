@@ -9,18 +9,67 @@ export class RoomFullError extends Error {}
 // Fixed by course spec, not something a creator can configure.
 export const MAX_ROOM_USERS = 12;
 
+// CLAUDE.md's Rooms section: "closure after 2 hours of inactivity."
+export const AUTO_CLOSE_INACTIVITY_MS = 2 * 60 * 60 * 1000;
+
 function randomSixDigitCode(): string {
   return String(randomInt(1_000_000)).padStart(6, "0");
+}
+
+// Pure: whether `room` is due to auto-close as of nowMs, given only its own
+// autoCloseEnabled flag and lastMeaningfulActivityAt — never itself mutates
+// anything, so it's the seam fake-clock tests probe directly. An
+// already-closed room is never "due" (closing is one-way).
+export function isAutoCloseDue(room: Room, nowMs: number): boolean {
+  if (room.closed || !room.autoCloseEnabled) return false;
+  return nowMs - Date.parse(room.lastMeaningfulActivityAt) >= AUTO_CLOSE_INACTIVITY_MS;
+}
+
+// Persists auto-close for every room whose inactivity window has elapsed,
+// computed purely from each room's stored lastMeaningfulActivityAt against
+// `nowMs` — never an in-memory timer — so the outcome is identical whether
+// the server has been running for days or was just restarted a moment ago.
+// Called opportunistically (see getRoomById/getActiveRoomByCode/
+// listPublicLobby below) rather than on any schedule of its own.
+function sweepInactiveRooms(db: DatabaseSync, nowMs: number): void {
+  const candidates = db
+    .prepare("SELECT roomId, lastMeaningfulActivityAt FROM rooms WHERE closed = 0 AND autoCloseEnabled = 1")
+    .all() as { roomId: string; lastMeaningfulActivityAt: string }[];
+  if (candidates.length === 0) return;
+
+  const close = db.prepare("UPDATE rooms SET closed = 1 WHERE roomId = ? AND closed = 0");
+  for (const candidate of candidates) {
+    if (nowMs - Date.parse(candidate.lastMeaningfulActivityAt) >= AUTO_CLOSE_INACTIVITY_MS) {
+      close.run(candidate.roomId);
+    }
+  }
+}
+
+// Bumps a room's lastMeaningfulActivityAt to nowMs — the only thing that
+// keeps an auto-close-enabled room open. Callers are exactly CLAUDE.md's
+// meaningful-activity list (join, track add, proposal create, vote,
+// successful shared playback action, successful reorder, reaction) — never
+// heartbeat/presence/polling/background traffic. A no-op against an
+// already-closed room: activity can never reopen a closed room.
+export function touchRoomActivity(db: DatabaseSync, roomId: string, nowMs: number = Date.now()): void {
+  db.prepare("UPDATE rooms SET lastMeaningfulActivityAt = ? WHERE roomId = ? AND closed = 0").run(
+    new Date(nowMs).toISOString(),
+    roomId,
+  );
 }
 
 // A code is exclusive only among currently-active (non-closed) rooms — see
 // the rooms_active_code index in db.ts, which is the authority under
 // concurrent writers. This retries past a collision it observes; `generate`
-// is overridable so tests can force one deterministically.
+// is overridable so tests can force one deterministically. Sweeps first so a
+// code held by a room that has just gone auto-close-inactive is correctly
+// treated as free rather than as a live collision.
 export function generateActiveRoomCode(
   db: DatabaseSync,
   generate: () => string = randomSixDigitCode,
+  nowMs: number = Date.now(),
 ): string {
+  sweepInactiveRooms(db, nowMs);
   const isTaken = db.prepare("SELECT 1 FROM rooms WHERE code = ? AND closed = 0");
   for (let attempt = 0; attempt < 100; attempt++) {
     const code = generate();
@@ -56,15 +105,21 @@ function rowToRoom(row: unknown): Room {
   };
 }
 
-export function getRoomById(db: DatabaseSync, roomId: string): Room | undefined {
+// Sweeps for auto-close inactivity before reading, so a room whose 2-hour
+// window has elapsed reports closed: true here even if nothing had touched
+// it since — the very first read after expiry is what persists the closure.
+export function getRoomById(db: DatabaseSync, roomId: string, nowMs: number = Date.now()): Room | undefined {
+  sweepInactiveRooms(db, nowMs);
   const row = db.prepare("SELECT * FROM rooms WHERE roomId = ?").get(roomId);
   return row ? rowToRoom(row) : undefined;
 }
 
-// Only ever matches an active room: closed rooms free their code (see the
-// rooms_active_code index), so a code that once belonged to a since-closed
-// room correctly reports no match here.
-export function getActiveRoomByCode(db: DatabaseSync, code: string): Room | undefined {
+// Only ever matches an active room: closed rooms (including one just swept
+// closed for inactivity) free their code (see the rooms_active_code index),
+// so a code that once belonged to a since-closed room correctly reports no
+// match here.
+export function getActiveRoomByCode(db: DatabaseSync, code: string, nowMs: number = Date.now()): Room | undefined {
+  sweepInactiveRooms(db, nowMs);
   const row = db.prepare("SELECT * FROM rooms WHERE code = ? AND closed = 0").get(code);
   return row ? rowToRoom(row) : undefined;
 }
@@ -76,7 +131,8 @@ export function getOccupancy(db: DatabaseSync, roomId: string): number {
   return row.n;
 }
 
-export function listPublicLobby(db: DatabaseSync): LobbyRoom[] {
+export function listPublicLobby(db: DatabaseSync, nowMs: number = Date.now()): LobbyRoom[] {
+  sweepInactiveRooms(db, nowMs);
   const rows = db
     .prepare(
       `SELECT roomId, name, maxUsers,
@@ -102,12 +158,12 @@ export function listPublicLobby(db: DatabaseSync): LobbyRoom[] {
 // "write" in this single-threaded process. That makes the race structurally
 // impossible rather than merely unlikely — see rooms.test.ts's concurrent
 // join test.
-export function joinRoom(db: DatabaseSync, roomId: string, accountId: string): JoinRoomResult {
-  const room = getRoomById(db, roomId);
+export function joinRoom(db: DatabaseSync, roomId: string, accountId: string, nowMs: number = Date.now()): JoinRoomResult {
+  const room = getRoomById(db, roomId, nowMs);
   if (!room) throw new RoomNotFoundError(`no room with id ${roomId}`);
   if (room.closed) throw new RoomClosedError(`room ${roomId} is closed`);
 
-  const now = new Date().toISOString();
+  const now = new Date(nowMs).toISOString();
   const result = db
     .prepare(
       `INSERT INTO room_participants (roomId, accountId, joinedAt)
@@ -128,6 +184,10 @@ export function joinRoom(db: DatabaseSync, roomId: string, accountId: string): J
       throw new RoomFullError(`room ${roomId} is full`);
     }
   }
+
+  // "join" is meaningful activity (CLAUDE.md's Rooms section) — covers both
+  // a fresh join and an idempotent re-join alike.
+  touchRoomActivity(db, roomId, nowMs);
 
   return { room, occupancy: getOccupancy(db, roomId) };
 }
