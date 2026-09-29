@@ -55,5 +55,21 @@ export function openDatabase(dbPath: string): DatabaseSync {
     )
   `);
 
+  // queueItemId (not this table's implicit rowid, and never an array index)
+  // is the stable identity of a queue item; rowid is only ever used to
+  // recover insertion order for display, never as identity.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS queue_items (
+      queueItemId  TEXT PRIMARY KEY,
+      roomId       TEXT NOT NULL REFERENCES rooms(roomId),
+      videoId      TEXT NOT NULL,
+      title        TEXT NOT NULL,
+      channelTitle TEXT NOT NULL,
+      thumbnailUrl TEXT NOT NULL,
+      addedBy      TEXT NOT NULL REFERENCES accounts(accountId),
+      addedAt      TEXT NOT NULL
+    )
+  `);
+
   return db;
 }

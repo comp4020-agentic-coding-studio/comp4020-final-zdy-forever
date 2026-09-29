@@ -77,3 +77,25 @@ export interface YoutubeSearchResult {
 export interface YoutubeVideoMetadata extends YoutubeSearchResult {
   embeddable: boolean;
 }
+
+// queueItemId is this item's permanent identity — never its position in the
+// returned array, which is only ever a display order. Metadata is always the
+// server's own canonical lookup, never whatever the client claimed.
+export interface QueueItem {
+  queueItemId: string;
+  roomId: string;
+  videoId: string;
+  title: string;
+  channelTitle: string;
+  thumbnailUrl: string;
+  addedBy: string;
+  addedAt: string;
+}
+
+// input may be a pasted YouTube URL, a bare videoId from a search result, or
+// a bare videoId from a demo song — the server treats all three identically
+// and re-resolves/re-validates independently either way.
+export interface AddTrackRequest {
+  accountId: string;
+  input: string;
+}

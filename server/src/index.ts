@@ -9,6 +9,7 @@ import type {
   HealthResponse,
   JoinRoomResult,
   LobbyRoom,
+  QueueItem,
   RegisterRequest,
   Room,
   YoutubeVideoMetadata,
@@ -16,6 +17,7 @@ import type {
 import { parseYouTubeVideoId } from "../../shared/src/youtube.ts";
 import { getAccountById, registerAccount } from "./accounts.ts";
 import { openDatabase } from "./db.ts";
+import { addTrack, InvalidTrackError, listQueue } from "./queue.ts";
 import {
   createRoom,
   getActiveRoomByCode,
@@ -182,6 +184,51 @@ function handleYoutubeError(res: express.Response, err: unknown): void {
   }
   throw err;
 }
+
+// Lists a room's queue in stable insertion order. queueItemId, not array
+// position, is each item's identity.
+app.get("/api/rooms/:roomId/queue", (req, res) => {
+  const { roomId } = req.params;
+  if (!getRoomById(db, roomId)) {
+    res.status(404).json({ error: "room not found" });
+    return;
+  }
+  const queue: QueueItem[] = listQueue(db, roomId);
+  res.json(queue);
+});
+
+// Adds a track — from a pasted URL, a search result, or a demo song, all
+// treated identically as untrusted input. Never requires a vote.
+app.post("/api/rooms/:roomId/queue", async (req, res) => {
+  const { roomId } = req.params;
+  const body = req.body as { accountId?: unknown; input?: unknown };
+  const accountId = typeof body.accountId === "string" ? body.accountId.trim() : "";
+  const input = typeof body.input === "string" ? body.input.trim() : "";
+
+  if (!accountId || !input) {
+    res.status(400).json({ error: "accountId and input are required" });
+    return;
+  }
+  if (!getRoomById(db, roomId)) {
+    res.status(404).json({ error: "room not found" });
+    return;
+  }
+  if (!getAccountById(db, accountId)) {
+    res.status(400).json({ error: "unknown accountId" });
+    return;
+  }
+
+  try {
+    const item: QueueItem = await addTrack(db, roomId, accountId, input);
+    res.status(201).json(item);
+  } catch (err) {
+    if (err instanceof InvalidTrackError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    handleYoutubeError(res, err);
+  }
+});
 
 // Search is submit-driven only — the client calls this once per explicit
 // search, never per keystroke (see App.tsx's search form).
