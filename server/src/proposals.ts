@@ -14,13 +14,20 @@ import {
   type VoteChoice,
 } from "../../shared/src/voting.ts";
 import { advanceToNextTrack, getCurrentPlayback, seekPlayback, setPlaybackStatus } from "./playback.ts";
-import { getQueueItemById, getQueueRevision, removeQueueItem } from "./queue.ts";
+import {
+  getQueueItemById,
+  getQueueRevision,
+  previewReorderQueue,
+  removeQueueItem,
+  reorderQueueItem,
+} from "./queue.ts";
+import { consumeReorderToken, getReorderTokenBalance } from "./reorderTokenStore.ts";
 
 // Wires the pure voting engine (shared/src/voting.ts) to real playback/queue
-// state and real-time broadcast for PLAY/PAUSE/SKIP/SEEK/REMOVE_QUEUE_ITEM —
-// REORDER_QUEUE is not connected yet. Owns the actual server-side clock: a
-// real setTimeout schedules resolution at expiresAt, so the 15-second window
-// is enforced by the server regardless of what any client claims about time.
+// state and real-time broadcast for PLAY/PAUSE/SKIP/SEEK/REMOVE_QUEUE_ITEM/
+// REORDER_QUEUE. Owns the actual server-side clock: a real setTimeout
+// schedules resolution at expiresAt, so the 15-second window is enforced by
+// the server regardless of what any client claims about time.
 //
 // Every broadcast carries { proposal, applied } — `proposal.state` is the
 // pure engine's honest verdict (OPEN/PASSED/FAILED), while `applied` says
@@ -34,11 +41,14 @@ export interface ProposalBroadcast {
 
 // Machine-readable codes for request-time rejections a client needs to
 // branch on (rather than just display): "only the current DJ may initiate
-// Seek" (CLAUDE.md's Voting section), and a request to remove the room's
+// Seek" (CLAUDE.md's Voting section), a request to remove the room's
 // currently-playing queue item (see the "Current-track removal" comment on
-// requestPlaybackProposal below) — a client is expected to distinguish both
-// from an ordinary validation error.
-export type ProposalRequestErrorCode = "NOT_CURRENT_DJ" | "IS_CURRENT_TRACK";
+// requestPlaybackProposal below), a REORDER_QUEUE drag that would produce no
+// real change (re-verified right now, before ever opening a vote over it),
+// and a REORDER_QUEUE request from an account with no reorder tokens left —
+// a client is expected to distinguish all of these from an ordinary
+// validation error.
+export type ProposalRequestErrorCode = "NOT_CURRENT_DJ" | "IS_CURRENT_TRACK" | "NO_OP" | "NO_REORDER_TOKENS";
 
 export type ProposalOutcome =
   | { ok: true; proposal: Proposal }
@@ -49,10 +59,13 @@ interface RequestOptions {
   // SEEK only: the DJ-chosen target position in ms. Never set by a client
   // for any other proposal type.
   positionMs?: number;
-  // REMOVE_QUEUE_ITEM only: the target item's stable id. Never a position/
-  // index — see CLAUDE.md's Queue and DJ section ("never use array index as
-  // identity").
+  // REMOVE_QUEUE_ITEM/REORDER_QUEUE only: the target item's stable id. Never
+  // a position/index — see CLAUDE.md's Queue and DJ section ("never use
+  // array index as identity").
   queueItemId?: string;
+  // REORDER_QUEUE only: the stable id of the item the dragged item should
+  // land before, or null to mean "move to the end of the queue."
+  beforeQueueItemId?: string | null;
 }
 
 // One active proposal per room at a time (CLAUDE.md's Reliability section:
@@ -72,19 +85,22 @@ export class ProposalManager {
     db: DatabaseSync,
     roomId: string,
     proposerAccountId: string,
-    type: "PLAY" | "PAUSE" | "SKIP" | "SEEK" | "REMOVE_QUEUE_ITEM",
+    type: "PLAY" | "PAUSE" | "SKIP" | "SEEK" | "REMOVE_QUEUE_ITEM" | "REORDER_QUEUE",
     options: RequestOptions = {},
   ): ProposalOutcome {
     if (this.active.has(roomId)) {
       return { ok: false, error: "a vote is already in progress in this room" };
     }
 
-    // REMOVE_QUEUE_ITEM is queue-kind, not playback-kind (see the "Current-
-    // track removal" comment above requestRemoveQueueItem) — it never
-    // requires anything currently playing, so it branches off before the
-    // playback-kind checks below.
+    // REMOVE_QUEUE_ITEM and REORDER_QUEUE are queue-kind, not playback-kind
+    // (see the "Current-track removal" comment above requestRemoveQueueItem)
+    // — neither requires anything currently playing, so both branch off
+    // before the playback-kind checks below.
     if (type === "REMOVE_QUEUE_ITEM") {
       return this.requestRemoveQueueItem(io, db, roomId, proposerAccountId, options);
+    }
+    if (type === "REORDER_QUEUE") {
+      return this.requestReorderQueue(io, db, roomId, proposerAccountId, options);
     }
 
     const playback = getCurrentPlayback(db, roomId);
@@ -172,6 +188,66 @@ export class ProposalManager {
       roomId,
       proposerAccountId,
       { type: "REMOVE_QUEUE_ITEM", queueItemId },
+      reference,
+      options.votingWindowMs,
+    );
+  }
+
+  // REORDER_QUEUE is queue-kind, like REMOVE_QUEUE_ITEM — it never requires
+  // anything currently playing. Two request-time gates exist purely to avoid
+  // spending a 15-second vote (and to give the requester an immediate, typed
+  // reason) on an outcome execution time would reject for free anyway:
+  //
+  // - previewReorderQueue re-verifies, right now, that this drag would
+  //   actually change the queue order — a drag dropped back onto its
+  //   original position (or its own current successor) is rejected outright
+  //   rather than opening a vote over a proposal that could only ever
+  //   resolve as a no-op (CLAUDE.md: "Failed, stale or no-op reorder
+  //   attempts cost nothing" — cheapest to honor by never starting one).
+  // - getReorderTokenBalance rejects a proposer already at 0 tokens. Since
+  //   only one proposal can be open per room at a time and the vote window
+  //   is at most 15 seconds, and regeneration only ever adds tokens, a
+  //   balance found positive here is guaranteed still positive at resolution
+  //   time in this same room — so gating here is equivalent to gating at
+  //   execution time, but fails fast with a typed reason instead of silently
+  //   letting a vote pass and then doing nothing.
+  private requestReorderQueue(
+    io: Server,
+    db: DatabaseSync,
+    roomId: string,
+    proposerAccountId: string,
+    options: RequestOptions,
+  ): ProposalOutcome {
+    const queueItemId = options.queueItemId;
+    if (!queueItemId) {
+      return { ok: false, error: "queueItemId is required" };
+    }
+    const beforeQueueItemId = options.beforeQueueItemId ?? null;
+
+    const item = getQueueItemById(db, roomId, queueItemId);
+    if (!item) {
+      return { ok: false, error: "no such queue item in this room" };
+    }
+    if (beforeQueueItemId !== null && !getQueueItemById(db, roomId, beforeQueueItemId)) {
+      return { ok: false, error: "no such target queue item in this room" };
+    }
+
+    if (!previewReorderQueue(db, roomId, queueItemId, beforeQueueItemId)) {
+      return { ok: false, error: "this would not change the queue order", code: "NO_OP" };
+    }
+
+    const balance = getReorderTokenBalance(db, roomId, proposerAccountId, Date.now());
+    if (balance.tokens < 1) {
+      return { ok: false, error: "no reorder tokens remaining", code: "NO_REORDER_TOKENS" };
+    }
+
+    const reference: ProposalReference = { kind: "queue", queueRevision: getQueueRevision(db, roomId) };
+    return this.openProposal(
+      io,
+      db,
+      roomId,
+      proposerAccountId,
+      { type: "REORDER_QUEUE", queueItemId, beforeQueueItemId },
       reference,
       options.votingWindowMs,
     );
@@ -356,6 +432,28 @@ export class ProposalManager {
       this.broadcast(io, roomId, resolved, result.removed);
       if (result.removed) {
         io.to(roomId).emit("queue:itemRemoved", { queueItemId });
+      }
+      return;
+    }
+
+    if (resolved.type === "REORDER_QUEUE") {
+      // resolved.payload.type === "REORDER_QUEUE" is guaranteed here for the
+      // same reason as the SEEK narrowing above.
+      const queueItemId = resolved.payload.type === "REORDER_QUEUE" ? resolved.payload.queueItemId : "";
+      const beforeQueueItemId = resolved.payload.type === "REORDER_QUEUE" ? resolved.payload.beforeQueueItemId : null;
+      const result = reorderQueueItem(db, roomId, queueItemId, beforeQueueItemId);
+      this.broadcast(io, roomId, resolved, result.reordered);
+      if (result.reordered) {
+        io.to(roomId).emit("queue:reordered", { queue: result.queue });
+        // CLAUDE.md: "Consume one token only after a reorder vote passes and
+        // a real reorder succeeds" — result.reordered === true is exactly
+        // that condition (a stale/failed/no-op reorder never reaches here at
+        // all, see the staleness check and reorderQueueItem's own no-op
+        // detection above). Broadcast the proposer's new balance regardless
+        // of consumeReorderToken's own ok/fail so every client's displayed
+        // balance for this account stays in sync either way.
+        const spend = consumeReorderToken(db, roomId, resolved.proposer, Date.now());
+        io.to(roomId).emit("reorderTokens:update", { accountId: resolved.proposer, balance: spend.balance });
       }
       return;
     }

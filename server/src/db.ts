@@ -72,8 +72,9 @@ export function openDatabase(dbPath: string): DatabaseSync {
   `);
 
   // queueItemId (not this table's implicit rowid, and never an array index)
-  // is the stable identity of a queue item; rowid is only ever used to
-  // recover insertion order for display, never as identity.
+  // is the stable identity of a queue item; rowid is only ever used as a
+  // tie-breaker for two rows that would otherwise share a position (there
+  // should never be any, but it keeps ordering deterministic regardless).
   db.exec(`
     CREATE TABLE IF NOT EXISTS queue_items (
       queueItemId  TEXT PRIMARY KEY,
@@ -86,6 +87,20 @@ export function openDatabase(dbPath: string): DatabaseSync {
       addedAt      TEXT NOT NULL
     )
   `);
+
+  // position is this room's explicit queue order — the only thing a passed
+  // REORDER_QUEUE proposal ever changes (see server/src/queue.ts's
+  // reorderQueueItem). A pre-reorder database has no such column yet, so a
+  // fresh row defaults every existing item to 0 and listQueue/getNextTrack
+  // fall back to rowid (insertion order) to break the tie, exactly
+  // reproducing the old rowid-only ordering until something is actually
+  // reordered for the first time in that room.
+  const existingQueueItemColumns = new Set(
+    (db.prepare("PRAGMA table_info(queue_items)").all() as { name: string }[]).map((c) => c.name),
+  );
+  if (!existingQueueItemColumns.has("position")) {
+    db.exec("ALTER TABLE queue_items ADD COLUMN position INTEGER NOT NULL DEFAULT 0");
+  }
 
   // The currently-playing queue item, one row per room (no row = nothing
   // currently playing), plus the server-authoritative sync anchor: status,

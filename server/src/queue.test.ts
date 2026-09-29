@@ -7,7 +7,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { registerAccount } from "./accounts.ts";
 import { createRoom } from "./rooms.ts";
 import { openDatabase } from "./db.ts";
-import { addTrack, InvalidTrackError, listQueue } from "./queue.ts";
+import { getNextTrack } from "./playback.ts";
+import { addTrack, InvalidTrackError, listQueue, planReorder, previewReorderQueue, reorderQueueItem } from "./queue.ts";
 
 function fakeMetadataFor(catalogue: Record<string, YoutubeVideoMetadata | null>) {
   return async (videoId: string): Promise<YoutubeVideoMetadata | null> => {
@@ -28,6 +29,14 @@ const SONG_B: YoutubeVideoMetadata = {
   title: "Song B",
   channelTitle: "Channel B",
   thumbnailUrl: "https://img.example/b.jpg",
+  embeddable: true,
+};
+
+const SONG_C: YoutubeVideoMetadata = {
+  videoId: "ddddddddddd",
+  title: "Song C",
+  channelTitle: "Channel C",
+  thumbnailUrl: "https://img.example/d.jpg",
   embeddable: true,
 };
 
@@ -185,5 +194,113 @@ describe("queue", () => {
 
     expect(listQueue(db, roomId).map((i) => i.videoId)).toEqual([SONG_A.videoId]);
     expect(listQueue(db, otherRoomId).map((i) => i.videoId)).toEqual([SONG_B.videoId]);
+  });
+
+  describe("planReorder (pure)", () => {
+    it("moves an item before another", () => {
+      expect(planReorder(["a", "b", "c"], "c", "a")).toEqual(["c", "a", "b"]);
+    });
+
+    it("moves an item to the end when beforeQueueItemId is null", () => {
+      expect(planReorder(["a", "b", "c"], "a", null)).toEqual(["b", "c", "a"]);
+    });
+
+    it("is a no-op when targeting itself", () => {
+      expect(planReorder(["a", "b", "c"], "a", "a")).toBeNull();
+    });
+
+    it("is a no-op when dropped back in front of its own current successor (its original position)", () => {
+      expect(planReorder(["a", "b", "c"], "a", "b")).toBeNull();
+    });
+
+    it("is a no-op when dropped at the end and it's already the last item", () => {
+      expect(planReorder(["a", "b", "c"], "c", null)).toBeNull();
+    });
+  });
+
+  describe("reorderQueueItem / previewReorderQueue", () => {
+    let a: string;
+    let b: string;
+    let c: string;
+
+    beforeEach(async () => {
+      const resolveMetadata = fakeMetadataFor({
+        [SONG_A.videoId]: SONG_A,
+        [SONG_B.videoId]: SONG_B,
+        [SONG_C.videoId]: SONG_C,
+      });
+      a = (await addTrack(db, roomId, accountId, SONG_A.videoId, { resolveMetadata })).queueItemId;
+      b = (await addTrack(db, roomId, accountId, SONG_B.videoId, { resolveMetadata })).queueItemId;
+      c = (await addTrack(db, roomId, accountId, SONG_C.videoId, { resolveMetadata })).queueItemId;
+    });
+
+    it("reorders the queue, persists the new order, and bumps queueRevision", () => {
+      const revisionBefore = db.prepare("SELECT queueRevision FROM rooms WHERE roomId = ?").get(roomId) as {
+        queueRevision: number;
+      };
+
+      const result = reorderQueueItem(db, roomId, c, a);
+
+      expect(result).toEqual({ reordered: true, queue: expect.any(Array) });
+      if (!result.reordered) throw new Error("unreachable");
+      expect(result.queue.map((i) => i.queueItemId)).toEqual([c, a, b]);
+      expect(listQueue(db, roomId).map((i) => i.queueItemId)).toEqual([c, a, b]);
+
+      const revisionAfter = db.prepare("SELECT queueRevision FROM rooms WHERE roomId = ?").get(roomId) as {
+        queueRevision: number;
+      };
+      expect(revisionAfter.queueRevision).toBe(revisionBefore.queueRevision + 1);
+    });
+
+    it("moves an item to the end of the queue when beforeQueueItemId is null", () => {
+      const result = reorderQueueItem(db, roomId, a, null);
+      expect(result).toEqual({ reordered: true, queue: expect.any(Array) });
+      if (!result.reordered) throw new Error("unreachable");
+      expect(result.queue.map((i) => i.queueItemId)).toEqual([b, c, a]);
+    });
+
+    it("costs nothing and bumps no revision when dropped back onto its original position", () => {
+      const revisionBefore = db.prepare("SELECT queueRevision FROM rooms WHERE roomId = ?").get(roomId) as {
+        queueRevision: number;
+      };
+
+      const result = reorderQueueItem(db, roomId, a, b); // a is already immediately before b — a no-op
+
+      expect(result).toEqual({ reordered: false, reason: "no-op" });
+      expect(listQueue(db, roomId).map((i) => i.queueItemId)).toEqual([a, b, c]);
+
+      const revisionAfter = db.prepare("SELECT queueRevision FROM rooms WHERE roomId = ?").get(roomId) as {
+        queueRevision: number;
+      };
+      expect(revisionAfter.queueRevision).toBe(revisionBefore.queueRevision);
+    });
+
+    it("rejects a queueItemId that doesn't exist in this room", () => {
+      expect(reorderQueueItem(db, roomId, "does-not-exist", a)).toEqual({ reordered: false, reason: "not-found" });
+    });
+
+    it("rejects a beforeQueueItemId that doesn't exist in this room", () => {
+      expect(reorderQueueItem(db, roomId, a, "does-not-exist")).toEqual({
+        reordered: false,
+        reason: "invalid-target",
+      });
+    });
+
+    it("previewReorderQueue matches reorderQueueItem's would-change verdict without mutating anything", () => {
+      expect(previewReorderQueue(db, roomId, c, a)).toBe(true);
+      expect(previewReorderQueue(db, roomId, a, b)).toBe(false); // no-op
+      expect(previewReorderQueue(db, roomId, "does-not-exist", a)).toBe(false);
+
+      // Confirm the preview truly didn't mutate anything.
+      expect(listQueue(db, roomId).map((i) => i.queueItemId)).toEqual([a, b, c]);
+    });
+
+    it("a successful reorder changes what getNextTrack reports as up next", () => {
+      expect(getNextTrack(db, roomId)?.queueItemId).toBe(a);
+
+      reorderQueueItem(db, roomId, c, a);
+
+      expect(getNextTrack(db, roomId)?.queueItemId).toBe(c);
+    });
   });
 });

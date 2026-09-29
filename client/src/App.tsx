@@ -24,6 +24,12 @@ function App() {
   const [seekSecondsInput, setSeekSecondsInput] = useState("");
   const playerRef = useRef<YoutubePlayerHandle | null>(null);
 
+  // Local drag UI state only — never authoritative. The actual reorder is
+  // requested as a REORDER_QUEUE proposal and only ever takes effect via the
+  // server's queue:reordered broadcast (see usePlaybackSync); dragQueueItemId
+  // just tracks which row's drag is in progress so onDrop knows what to move.
+  const [dragQueueItemId, setDragQueueItemId] = useState<string | null>(null);
+
   const accountId = account && account !== "error" ? account.accountId : null;
   const live = usePlaybackSync(liveRoomId, accountId, getClientId(), playerRef);
 
@@ -264,11 +270,54 @@ function App() {
               <p>nothing is currently playing</p>
             )}
 
+            {live.reorderTokenBalance && (
+              <p>
+                Reorder tokens: {live.reorderTokenBalance.tokens}/{live.reorderTokenBalance.maxTokens}
+                {live.reorderTokenBalance.nextRegenAt && (
+                  <> (next +1 at {new Date(live.reorderTokenBalance.nextRegenAt).toLocaleTimeString()})</>
+                )}
+              </p>
+            )}
+
             <p>Queue ({live.queue.length}):</p>
             <ul>
-              {live.queue.map((item) => (
-                <li key={item.queueItemId}>
+              {live.queue.map((item, index) => (
+                <li
+                  key={item.queueItemId}
+                  draggable
+                  onDragStart={() => setDragQueueItemId(item.queueItemId)}
+                  onDragEnd={() => setDragQueueItemId(null)}
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    if (dragQueueItemId) live.requestReorderQueueProposal(dragQueueItemId, item.queueItemId);
+                    setDragQueueItemId(null);
+                  }}
+                >
                   {item.title} — {item.channelTitle}
+                  {/* Mobile-accessible fallback for drag-and-drop: swaps this
+                      item with its immediate neighbor. Both request the exact
+                      same REORDER_QUEUE proposal a drag would — no separate
+                      code path on the server. */}
+                  <button
+                    type="button"
+                    disabled={index === 0}
+                    onClick={() => live.requestReorderQueueProposal(item.queueItemId, live.queue[index - 1].queueItemId)}
+                  >
+                    ⬆ Move up
+                  </button>
+                  <button
+                    type="button"
+                    disabled={index === live.queue.length - 1}
+                    onClick={() =>
+                      live.requestReorderQueueProposal(
+                        item.queueItemId,
+                        index + 2 < live.queue.length ? live.queue[index + 2].queueItemId : null,
+                      )
+                    }
+                  >
+                    ⬇ Move down
+                  </button>
                   {/* The currently-playing item can never be removed via a vote
                       here — see ProposalManager.requestRemoveQueueItem in
                       server/src/proposals.ts; skip is the only way off it. */}
@@ -282,6 +331,18 @@ function App() {
                   )}
                 </li>
               ))}
+              {/* Drop target for dragging an item to the very end of the queue
+                  — beforeQueueItemId: null means "move to the end." */}
+              <li
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  if (dragQueueItemId) live.requestReorderQueueProposal(dragQueueItemId, null);
+                  setDragQueueItemId(null);
+                }}
+              >
+                (drop here to move to end of queue)
+              </li>
             </ul>
           </>
         )}

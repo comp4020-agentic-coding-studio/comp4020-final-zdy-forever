@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { io, type Socket } from "socket.io-client";
 import { classifyDrift, computeExpectedPositionMs } from "../../shared/src/playbackSync.ts";
-import type { PlaybackState, PresenceEntry, QueueItem, Room, RoomSnapshot } from "../../shared/src/types.ts";
+import type {
+  PlaybackState,
+  PresenceEntry,
+  QueueItem,
+  ReorderTokenBalance,
+  Room,
+  RoomSnapshot,
+} from "../../shared/src/types.ts";
 import type { Proposal, VoteChoice } from "../../shared/src/voting.ts";
 import { YT_PLAYER_STATE, type YoutubePlayerHandle } from "./YoutubePlayer.tsx";
 
@@ -31,6 +38,12 @@ export interface RoomLiveState {
   // proposal:update.
   activeProposal: Proposal | null;
   proposalError: string | null;
+  // This client's own reorder-token balance in this room, or null before the
+  // initial fetch (right after join) has resolved. Always server-computed
+  // (see GET /api/rooms/:roomId/reorder-tokens/:accountId) — never tracked
+  // or decremented locally; reorderTokens:update is the only thing that ever
+  // changes it after the initial fetch.
+  reorderTokenBalance: ReorderTokenBalance | null;
 }
 
 const EMPTY_STATE: RoomLiveState = {
@@ -42,6 +55,7 @@ const EMPTY_STATE: RoomLiveState = {
   playback: null,
   activeProposal: null,
   proposalError: null,
+  reorderTokenBalance: null,
 };
 
 // Establishes the client's socket connection, joins (and rejoins on every
@@ -105,7 +119,7 @@ export function usePlaybackSync(
     });
 
     socket.on("room:snapshot", (snapshot: RoomSnapshot) => {
-      setState({
+      setState((s) => ({
         connected: true,
         joinError: null,
         room: snapshot.room,
@@ -114,8 +128,24 @@ export function usePlaybackSync(
         playback: snapshot.playback,
         activeProposal: snapshot.activeProposal,
         proposalError: null,
-      });
+        reorderTokenBalance: s.reorderTokenBalance,
+      }));
       applyAnchor(snapshot.playback);
+
+      // The snapshot itself carries no reorder-token balance (it's not part
+      // of room-shared state, unlike the queue/playback/presence above) — a
+      // fresh REST fetch on every (re)join keeps it correct even if this
+      // client missed reorderTokens:update broadcasts while disconnected.
+      fetch(`/api/rooms/${roomId}/reorder-tokens/${accountId}`)
+        .then((res) => (res.ok ? (res.json() as Promise<ReorderTokenBalance>) : null))
+        .then((balance) => {
+          if (balance) setState((s) => ({ ...s, reorderTokenBalance: balance }));
+        })
+        .catch(() => {
+          // Best-effort: a failed fetch just leaves the last-known (or null)
+          // balance in place; reorderTokens:update will correct it on the
+          // next successful reorder regardless.
+        });
     });
 
     socket.on("playback:update", (playback: PlaybackState | null) => {
@@ -159,6 +189,24 @@ export function usePlaybackSync(
       setState((s) => ({ ...s, presence: s.presence.filter((p) => p.accountId !== leftId) }));
     });
 
+    // A passed REORDER_QUEUE vote actually changed the queue order (see
+    // ProposalManager.resolveRoom) — the server sends the whole reordered
+    // queue rather than a delta, since "which item moved where" is exactly
+    // as cheap to broadcast as any patch would be and leaves no room for the
+    // client to reconstruct order incorrectly.
+    socket.on("queue:reordered", ({ queue }: { queue: QueueItem[] }) => {
+      setState((s) => ({ ...s, queue }));
+    });
+
+    // This account's reorder-token balance changed (a token was just spent
+    // by a passed reorder this account proposed) — filtered to this client's
+    // own accountId, since every client in the room receives every account's
+    // update but only cares about its own.
+    socket.on("reorderTokens:update", ({ accountId: forId, balance }: { accountId: string; balance: ReorderTokenBalance }) => {
+      if (forId !== accountId) return;
+      setState((s) => ({ ...s, reorderTokenBalance: balance }));
+    });
+
     return () => {
       socket.disconnect();
       socketRef.current = null;
@@ -193,6 +241,18 @@ export function usePlaybackSync(
   // instead.
   const requestRemoveQueueItemProposal = useCallback((queueItemId: string) => {
     socketRef.current?.emit("proposal:request", { type: "REMOVE_QUEUE_ITEM", queueItemId });
+  }, []);
+
+  // Requests a REORDER_QUEUE proposal moving `queueItemId` to just before
+  // `beforeQueueItemId`, or to the end of the queue if null. Never mutates
+  // the local queue array itself — queue:reordered (only sent once a vote
+  // actually passes and the reorder genuinely changes something) is the only
+  // source of truth, exactly like every other proposal type here. A drag
+  // dropped back onto its original position, or the server otherwise finding
+  // no real change, comes back as a typed NO_OP proposal:requestError rather
+  // than ever opening a vote — see ProposalManager.requestReorderQueue.
+  const requestReorderQueueProposal = useCallback((queueItemId: string, beforeQueueItemId: string | null) => {
+    socketRef.current?.emit("proposal:request", { type: "REORDER_QUEUE", queueItemId, beforeQueueItemId });
   }, []);
 
   const castProposalVote = useCallback((proposalId: string, choice: VoteChoice) => {
@@ -256,6 +316,7 @@ export function usePlaybackSync(
     requestPlaybackProposal,
     requestSeekProposal,
     requestRemoveQueueItemProposal,
+    requestReorderQueueProposal,
     castProposalVote,
     handlePlayerStateChange,
   };

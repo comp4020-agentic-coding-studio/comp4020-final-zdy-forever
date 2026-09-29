@@ -9,6 +9,7 @@ import { openDatabase } from "./db.ts";
 import { advanceToNextTrack, ensureCurrentTrack, getCurrentPlayback, setPlaybackStatus } from "./playback.ts";
 import { ProposalManager, type ProposalBroadcast } from "./proposals.ts";
 import { addTrack, getQueueRevision, listQueue, removeQueueItem } from "./queue.ts";
+import { consumeReorderToken, getReorderTokenBalance } from "./reorderTokenStore.ts";
 import { createRoom } from "./rooms.ts";
 
 // A minimal io.Server stand-in: ProposalManager only ever calls
@@ -755,6 +756,183 @@ describe("ProposalManager", () => {
       .filter((e) => e.event === "proposal:update" && (e.payload as ProposalBroadcast).proposal.proposalId === requested.proposal.proposalId)
       .map((e) => e.payload as ProposalBroadcast);
     expect(updates[updates.length - 1].proposal.state).toBe("FAILED");
+  });
+
+  // --- REORDER_QUEUE ------------------------------------------------------
+
+  it("reorders the queue once a REORDER_QUEUE vote passes and consumes exactly one reorder token from the proposer", async () => {
+    const manager = new ProposalManager();
+    const { io, emitted } = fakeIo();
+    const b = await addTrack(db, roomId, bob.accountId, SONG_ID, { resolveMetadata });
+    const c = await addTrack(db, roomId, carol.accountId, SONG_ID, { resolveMetadata });
+    // Order before: [a(current), b, c]. Move c before b -> [a, c, b].
+
+    const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "REORDER_QUEUE", {
+      votingWindowMs: 30,
+      queueItemId: c.queueItemId,
+      beforeQueueItemId: b.queueItemId,
+    });
+    expect(requested.ok).toBe(true);
+    if (!requested.ok) return;
+    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+
+    await sleep(60);
+
+    const queue = listQueue(db, roomId);
+    expect(queue.map((q) => q.queueItemId)).toEqual([
+      (await getCurrentPlayback(db, roomId))!.queueItemId,
+      c.queueItemId,
+      b.queueItemId,
+    ]);
+
+    const resolution = emitted.find(
+      (e) => e.event === "proposal:update" && (e.payload as ProposalBroadcast).proposal.state === "PASSED",
+    );
+    expect((resolution?.payload as ProposalBroadcast).applied).toBe(true);
+
+    const reorderedEvent = emitted.find((e) => e.event === "queue:reordered");
+    expect((reorderedEvent?.payload as { queue: unknown[] }).queue.map((q) => (q as { queueItemId: string }).queueItemId)).toEqual([
+      (await getCurrentPlayback(db, roomId))!.queueItemId,
+      c.queueItemId,
+      b.queueItemId,
+    ]);
+
+    const tokenEvent = emitted.find((e) => e.event === "reorderTokens:update");
+    expect((tokenEvent?.payload as { accountId: string; balance: { tokens: number } }).accountId).toBe(alice.accountId);
+    expect((tokenEvent?.payload as { accountId: string; balance: { tokens: number } }).balance.tokens).toBe(4);
+    expect(getReorderTokenBalance(db, roomId, alice.accountId).tokens).toBe(4);
+    expect(manager.getActiveProposal(roomId)).toBeNull();
+  });
+
+  it("does not consume a reorder token when a REORDER_QUEUE proposal fails its vote", async () => {
+    const manager = new ProposalManager();
+    const { io, emitted } = fakeIo();
+    const b = await addTrack(db, roomId, bob.accountId, SONG_ID, { resolveMetadata });
+    const c = await addTrack(db, roomId, carol.accountId, SONG_ID, { resolveMetadata });
+    const beforeQueue = listQueue(db, roomId).map((q) => q.queueItemId);
+
+    const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "REORDER_QUEUE", {
+      votingWindowMs: 20,
+      queueItemId: c.queueItemId,
+      beforeQueueItemId: b.queueItemId,
+    });
+    expect(requested.ok).toBe(true);
+    // Only alice (the proposer, auto-YES) ever votes — one non-abstain vote
+    // is short of the minimum 2, so this fails without anyone else voting.
+
+    await sleep(60);
+
+    expect(listQueue(db, roomId).map((q) => q.queueItemId)).toEqual(beforeQueue);
+    expect(getReorderTokenBalance(db, roomId, alice.accountId).tokens).toBe(5);
+
+    const resolutions = emitted.filter((e) => e.event === "proposal:update").map((e) => e.payload as ProposalBroadcast);
+    const final = resolutions[resolutions.length - 1];
+    expect(final.proposal.state).toBe("FAILED");
+    expect(final.applied).toBe(false);
+    expect(emitted.some((e) => e.event === "queue:reordered")).toBe(false);
+    expect(emitted.some((e) => e.event === "reorderTokens:update")).toBe(false);
+  });
+
+  it("does not apply a passed REORDER_QUEUE proposal once queueRevision has moved on mid-vote, and consumes no token", async () => {
+    const manager = new ProposalManager();
+    const { io, emitted } = fakeIo();
+    const b = await addTrack(db, roomId, bob.accountId, SONG_ID, { resolveMetadata });
+    const c = await addTrack(db, roomId, carol.accountId, SONG_ID, { resolveMetadata });
+    const d = await addTrack(db, roomId, carol.accountId, SONG_ID, { resolveMetadata });
+    const beforeOrder = listQueue(db, roomId).map((q) => q.queueItemId);
+
+    const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "REORDER_QUEUE", {
+      votingWindowMs: 30,
+      queueItemId: c.queueItemId,
+      beforeQueueItemId: b.queueItemId,
+    });
+    expect(requested.ok).toBe(true);
+    if (!requested.ok) return;
+    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+
+    // Something else (here, an unrelated removal) bumps queueRevision while
+    // the reorder vote on b/c is still open.
+    removeQueueItem(db, roomId, d.queueItemId);
+
+    await sleep(60);
+
+    // b and c are still in their original relative order — never reordered —
+    // only d (removed out of band) is gone.
+    expect(listQueue(db, roomId).map((q) => q.queueItemId)).toEqual(beforeOrder.filter((id) => id !== d.queueItemId));
+    expect(getReorderTokenBalance(db, roomId, alice.accountId).tokens).toBe(5);
+
+    const resolution = emitted.find(
+      (e) => e.event === "proposal:update" && (e.payload as ProposalBroadcast).proposal.state === "PASSED",
+    );
+    expect((resolution?.payload as ProposalBroadcast).applied).toBe(false);
+    expect(emitted.some((e) => e.event === "queue:reordered")).toBe(false);
+    expect(emitted.some((e) => e.event === "reorderTokens:update")).toBe(false);
+  });
+
+  it("rejects a second REORDER_QUEUE proposal request while one is already open in the same room", async () => {
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+    const b = await addTrack(db, roomId, bob.accountId, SONG_ID, { resolveMetadata });
+    const c = await addTrack(db, roomId, carol.accountId, SONG_ID, { resolveMetadata });
+
+    const first = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "REORDER_QUEUE", {
+      votingWindowMs: 5_000,
+      queueItemId: c.queueItemId,
+      beforeQueueItemId: b.queueItemId,
+    });
+    expect(first.ok).toBe(true);
+
+    const second = manager.requestPlaybackProposal(io, db, roomId, bob.accountId, "REORDER_QUEUE", {
+      votingWindowMs: 5_000,
+      queueItemId: b.queueItemId,
+      beforeQueueItemId: null,
+    });
+    expect(second.ok).toBe(false);
+    if (second.ok) return;
+    expect(second.error).toMatch(/already in progress/);
+  });
+
+  it("rejects a REORDER_QUEUE request that would produce no real change with a typed NO_OP error, before ever opening a vote", async () => {
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+    const b = await addTrack(db, roomId, bob.accountId, SONG_ID, { resolveMetadata });
+    const c = await addTrack(db, roomId, carol.accountId, SONG_ID, { resolveMetadata });
+    // Order is [a, b, c] — b is already immediately before c, so "move b
+    // before c" changes nothing.
+
+    const result = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "REORDER_QUEUE", {
+      votingWindowMs: 5_000,
+      queueItemId: b.queueItemId,
+      beforeQueueItemId: c.queueItemId,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.code).toBe("NO_OP");
+    expect(manager.getActiveProposal(roomId)).toBeNull();
+  });
+
+  it("rejects a REORDER_QUEUE request from an account with no reorder tokens remaining with a typed NO_REORDER_TOKENS error", async () => {
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+    const b = await addTrack(db, roomId, bob.accountId, SONG_ID, { resolveMetadata });
+    const c = await addTrack(db, roomId, carol.accountId, SONG_ID, { resolveMetadata });
+
+    for (let i = 0; i < 5; i += 1) {
+      consumeReorderToken(db, roomId, alice.accountId, Date.now());
+    }
+    expect(getReorderTokenBalance(db, roomId, alice.accountId).tokens).toBe(0);
+
+    const result = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "REORDER_QUEUE", {
+      votingWindowMs: 5_000,
+      queueItemId: c.queueItemId,
+      beforeQueueItemId: b.queueItemId,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.code).toBe("NO_REORDER_TOKENS");
+    expect(manager.getActiveProposal(roomId)).toBeNull();
   });
 });
 

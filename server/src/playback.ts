@@ -67,30 +67,34 @@ export function getCurrentPlayback(db: DatabaseSync, roomId: string): PlaybackSt
 }
 
 // The queue item that would play after the current one: the item with the
-// smallest rowid greater than the current item's rowid (queue insertion
-// order), or, if nothing is currently playing, simply the first item in the
-// queue (whatever would start if playback began now).
+// smallest position greater than the current item's position (this room's
+// explicit queue order — see reorderQueueItem in server/src/queue.ts; rowid
+// only breaks a tie between rows that somehow share a position), or, if
+// nothing is currently playing, simply the first item in the queue (whatever
+// would start if playback began now). Reading position here rather than
+// rowid is what makes a passed REORDER_QUEUE vote actually change what plays
+// next, not just what a client happens to display.
 export function getNextTrack(db: DatabaseSync, roomId: string): QueueItem | null {
   const row = getPlaybackRow(db, roomId);
 
   if (!row) {
     const first = db
-      .prepare(`SELECT ${QUEUE_ITEM_COLUMNS} FROM queue_items WHERE roomId = ? ORDER BY rowid ASC LIMIT 1`)
+      .prepare(`SELECT ${QUEUE_ITEM_COLUMNS} FROM queue_items WHERE roomId = ? ORDER BY position ASC, rowid ASC LIMIT 1`)
       .get(roomId) as QueueItem | undefined;
     return first ?? null;
   }
 
-  const currentRowid = (
-    db.prepare("SELECT rowid AS rowid FROM queue_items WHERE queueItemId = ?").get(row.queueItemId) as
-      | { rowid: number }
+  const currentPosition = (
+    db.prepare("SELECT position AS position FROM queue_items WHERE queueItemId = ?").get(row.queueItemId) as
+      | { position: number }
       | undefined
-  )?.rowid;
+  )?.position;
 
   const next = db
     .prepare(
-      `SELECT ${QUEUE_ITEM_COLUMNS} FROM queue_items WHERE roomId = ? AND rowid > ? ORDER BY rowid ASC LIMIT 1`,
+      `SELECT ${QUEUE_ITEM_COLUMNS} FROM queue_items WHERE roomId = ? AND position > ? ORDER BY position ASC, rowid ASC LIMIT 1`,
     )
-    .get(roomId, currentRowid ?? 0) as QueueItem | undefined;
+    .get(roomId, currentPosition ?? -1) as QueueItem | undefined;
 
   return next ?? null;
 }

@@ -123,15 +123,16 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
       }
     });
 
-    // Requests a PLAY, PAUSE, SKIP, SEEK or REMOVE_QUEUE_ITEM proposal — the
-    // client never sets playback status or mutates the queue directly
-    // (CLAUDE.md's Authority section). ProposalManager enforces one active
-    // proposal per room, rejects a redundant Play-while-playing/Pause-while-
-    // paused/remove-the-current-track request up front, and owns the real
-    // 15-second timer that resolves the vote server-side.
+    // Requests a PLAY, PAUSE, SKIP, SEEK, REMOVE_QUEUE_ITEM or REORDER_QUEUE
+    // proposal — the client never sets playback status or mutates the queue
+    // directly (CLAUDE.md's Authority section). ProposalManager enforces one
+    // active proposal per room, rejects a redundant Play-while-playing/
+    // Pause-while-paused/remove-the-current-track/no-op-reorder/no-tokens-
+    // left request up front, and owns the real 15-second timer that resolves
+    // the vote server-side.
     socket.on(
       "proposal:request",
-      (payload: { type?: unknown; positionMs?: unknown; queueItemId?: unknown }) => {
+      (payload: { type?: unknown; positionMs?: unknown; queueItemId?: unknown; beforeQueueItemId?: unknown }) => {
         if (!data.roomId) {
           socket.emit("proposal:requestError", { error: "join a room before requesting a vote" });
           return;
@@ -142,17 +143,29 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
           type !== "PAUSE" &&
           type !== "SKIP" &&
           type !== "SEEK" &&
-          type !== "REMOVE_QUEUE_ITEM"
+          type !== "REMOVE_QUEUE_ITEM" &&
+          type !== "REORDER_QUEUE"
         ) {
           socket.emit("proposal:requestError", { error: "unsupported proposal type" });
           return;
         }
         const positionMs = typeof payload?.positionMs === "number" ? payload.positionMs : undefined;
         const queueItemId = typeof payload?.queueItemId === "string" ? payload.queueItemId : undefined;
+        // beforeQueueItemId is REORDER_QUEUE-only and three-way: a string
+        // (move before that item), explicit null (move to the end of the
+        // queue), or omitted entirely (any other proposal type, where it
+        // must stay undefined rather than defaulting to null).
+        const beforeQueueItemId =
+          typeof payload?.beforeQueueItemId === "string"
+            ? payload.beforeQueueItemId
+            : payload?.beforeQueueItemId === null
+              ? null
+              : undefined;
         const result = proposals.requestPlaybackProposal(io, db, data.roomId, data.accountId, type, {
           votingWindowMs: options.votingWindowMs,
           positionMs,
           queueItemId,
+          beforeQueueItemId,
         });
         if (!result.ok) {
           socket.emit("proposal:requestError", { error: result.error, code: result.code });
