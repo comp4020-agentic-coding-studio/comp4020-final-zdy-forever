@@ -20,7 +20,7 @@ import type {
 import { parseYouTubeVideoId } from "../../shared/src/youtube.ts";
 import { getAccountById, registerAccount } from "./accounts.ts";
 import { openDatabase } from "./db.ts";
-import { ensureCurrentTrack, getCurrentPlayback, getNextTrack } from "./playback.ts";
+import { ensureCurrentTrack, getCurrentPlayback, getNextTrack, recoverPlaybackOnStartup } from "./playback.ts";
 import { addTrack, InvalidTrackError, listQueue } from "./queue.ts";
 import { attachRealtime } from "./realtime.ts";
 import {
@@ -51,6 +51,11 @@ const clientDist = path.join(repoRoot, "client/dist");
 // falls back to a repo-local file for local dev and manual runs.
 const databasePath = process.env.DATABASE_PATH ?? path.join(repoRoot, "data/echo-room.sqlite");
 const db = openDatabase(databasePath);
+
+// Per CLAUDE.md's Persistence section: a previously playing track must
+// recover at its last saved position as PAUSED, never extrapolated forward
+// through the unknown downtime. Must run before any socket can connect.
+recoverPlaybackOnStartup(db);
 
 const app = express();
 app.use(express.json());
@@ -230,9 +235,15 @@ app.post("/api/rooms/:roomId/queue", async (req, res) => {
   try {
     const item: QueueItem = await addTrack(db, roomId, accountId, input);
     // If nothing is currently playing in this room (e.g. this is the first
-    // track ever added, or the queue had drained), it starts playing now.
-    ensureCurrentTrack(db, roomId, item.queueItemId);
+    // track ever added, or the queue had drained), it starts playing now —
+    // ensureCurrentTrack only returns non-null when this call actually
+    // started it, so the broadcast doesn't fire when a track was already
+    // playing.
+    const started = ensureCurrentTrack(db, roomId, item.queueItemId);
     io.to(roomId).emit("queue:itemAdded", item);
+    if (started) {
+      io.to(roomId).emit("playback:update", started);
+    }
     res.status(201).json(item);
   } catch (err) {
     if (err instanceof InvalidTrackError) {

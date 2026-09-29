@@ -1,0 +1,627 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import type { DatabaseSync } from "node:sqlite";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Account, YoutubeVideoMetadata } from "../../shared/src/types.ts";
+import { registerAccount } from "./accounts.ts";
+import { openDatabase } from "./db.ts";
+import { advanceToNextTrack, ensureCurrentTrack, getCurrentPlayback, setPlaybackStatus } from "./playback.ts";
+import { ProposalManager, type ProposalBroadcast } from "./proposals.ts";
+import { addTrack } from "./queue.ts";
+import { createRoom } from "./rooms.ts";
+
+// A minimal io.Server stand-in: ProposalManager only ever calls
+// io.to(roomId).emit(event, payload), so a fake this thin is enough to
+// capture every broadcast without pulling in a real Socket.IO server.
+function fakeIo() {
+  const emitted: Array<{ roomId: string; event: string; payload: unknown }> = [];
+  const io = {
+    to(roomId: string) {
+      return {
+        emit(event: string, payload: unknown) {
+          emitted.push({ roomId, event, payload });
+        },
+      };
+    },
+  };
+  return { io: io as unknown as import("socket.io").Server, emitted };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const SONG_ID = "aaaaaaaaaaa";
+
+describe("ProposalManager", () => {
+  let dir: string;
+  let db: DatabaseSync;
+  let roomId: string;
+  let alice: Account;
+  let bob: Account;
+  let carol: Account;
+
+  const SONG: YoutubeVideoMetadata = {
+    videoId: SONG_ID,
+    title: "Song A",
+    channelTitle: "Channel A",
+    thumbnailUrl: "https://example.com/a.jpg",
+    embeddable: true,
+  };
+  const resolveMetadata = async (videoId: string): Promise<YoutubeVideoMetadata | null> =>
+    videoId === SONG_ID ? SONG : null;
+
+  beforeEach(async () => {
+    dir = mkdtempSync(path.join(tmpdir(), "echo-room-proposals-"));
+    db = openDatabase(path.join(dir, "echo-room.sqlite"));
+    alice = registerAccount(db, "client-alice", "Alice");
+    bob = registerAccount(db, "client-bob", "Bob");
+    carol = registerAccount(db, "client-carol", "Carol");
+    roomId = createRoom(db, {
+      accountId: alice.accountId,
+      name: "Room",
+      visibility: "PUBLIC",
+      autoCloseEnabled: false,
+    }).roomId;
+
+    const item = await addTrack(db, roomId, alice.accountId, SONG_ID, { resolveMetadata });
+    ensureCurrentTrack(db, roomId, item.queueItemId);
+  });
+
+  afterEach(() => {
+    try {
+      db.close();
+    } catch {
+      // already closed
+    }
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("resolves a PAUSE proposal that passes and applies it to authoritative playback", async () => {
+    const manager = new ProposalManager();
+    const { io, emitted } = fakeIo();
+
+    const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "PAUSE", {
+      votingWindowMs: 20,
+    });
+    expect(requested.ok).toBe(true);
+    if (!requested.ok) return;
+
+    // Alice (proposer) auto-voted YES; Bob provides the second non-abstain
+    // vote needed to clear the minimum-2 threshold.
+    const voted = manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+    expect(voted.ok).toBe(true);
+
+    await sleep(60);
+
+    expect(manager.getActiveProposal(roomId)).toBeNull();
+    const current = getCurrentPlayback(db, roomId);
+    expect(current?.status).toBe("PAUSED");
+
+    const resolutions = emitted.filter((e) => e.event === "proposal:update").map((e) => e.payload as ProposalBroadcast);
+    const final = resolutions[resolutions.length - 1];
+    expect(final.proposal.state).toBe("PASSED");
+    expect(final.applied).toBe(true);
+
+    expect(emitted.some((e) => e.event === "playback:update")).toBe(true);
+  });
+
+  it("fails a proposal with only one non-abstain vote (the proposer's own) and leaves playback unchanged", async () => {
+    const manager = new ProposalManager();
+    const { io, emitted } = fakeIo();
+
+    const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "PAUSE", {
+      votingWindowMs: 20,
+    });
+    expect(requested.ok).toBe(true);
+
+    await sleep(60);
+
+    const current = getCurrentPlayback(db, roomId);
+    expect(current?.status).toBe("PLAYING");
+
+    const resolutions = emitted.filter((e) => e.event === "proposal:update").map((e) => e.payload as ProposalBroadcast);
+    const final = resolutions[resolutions.length - 1];
+    expect(final.proposal.state).toBe("FAILED");
+    expect(final.applied).toBe(false);
+  });
+
+  it("fails a tied vote (one YES, one NO) even though the minimum vote count is met", async () => {
+    const manager = new ProposalManager();
+    const { io, emitted } = fakeIo();
+
+    const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "PAUSE", {
+      votingWindowMs: 20,
+    });
+    expect(requested.ok).toBe(true);
+    if (!requested.ok) return;
+
+    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "NO");
+
+    await sleep(60);
+
+    expect(getCurrentPlayback(db, roomId)?.status).toBe("PLAYING");
+    const resolutions = emitted.filter((e) => e.event === "proposal:update").map((e) => e.payload as ProposalBroadcast);
+    expect(resolutions[resolutions.length - 1].proposal.state).toBe("FAILED");
+  });
+
+  // --- duplicate vote --------------------------------------------------
+
+  it("a duplicate vote from the same account replaces their earlier ballot rather than counting twice", async () => {
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+
+    const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "PAUSE", {
+      votingWindowMs: 5_000,
+    });
+    expect(requested.ok).toBe(true);
+    if (!requested.ok) return;
+
+    const first = manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+    expect(first.ok).toBe(true);
+    const second = manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "NO");
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+
+    expect(second.proposal.votes[bob.accountId]).toBe("NO");
+    expect(Object.keys(second.proposal.votes)).toHaveLength(2); // alice + bob, not three entries
+  });
+
+  // --- concurrent proposals ---------------------------------------------
+
+  it("rejects a second proposal request while one is already open in the same room", () => {
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+
+    const first = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "PAUSE", {
+      votingWindowMs: 5_000,
+    });
+    expect(first.ok).toBe(true);
+
+    const second = manager.requestPlaybackProposal(io, db, roomId, bob.accountId, "PAUSE", { votingWindowMs: 5_000 });
+    expect(second.ok).toBe(false);
+    if (second.ok) return;
+    expect(second.error).toMatch(/already in progress/);
+  });
+
+  it("allows a fresh proposal in the same room once the previous one has resolved", async () => {
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+
+    const first = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "PAUSE", { votingWindowMs: 20 });
+    expect(first.ok).toBe(true);
+    await sleep(60);
+    // First proposal failed (only proposer voted), so playback is still PLAYING.
+
+    const second = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "PAUSE", { votingWindowMs: 5_000 });
+    expect(second.ok).toBe(true);
+  });
+
+  // --- stale playback revision -------------------------------------------
+
+  it("does not apply a passed proposal whose reference has gone stale by resolution time", async () => {
+    const manager = new ProposalManager();
+    const { io, emitted } = fakeIo();
+
+    const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "PAUSE", {
+      votingWindowMs: 20,
+    });
+    expect(requested.ok).toBe(true);
+    if (!requested.ok) return;
+
+    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+
+    // Something else (e.g. a track transition) rebases playback state before
+    // the vote closes, invalidating the proposal's captured reference.
+    setPlaybackStatus(db, roomId, "PAUSED");
+    setPlaybackStatus(db, roomId, "PLAYING");
+
+    await sleep(60);
+
+    const resolutions = emitted.filter((e) => e.event === "proposal:update").map((e) => e.payload as ProposalBroadcast);
+    const final = resolutions[resolutions.length - 1];
+    expect(final.proposal.state).toBe("PASSED");
+    expect(final.applied).toBe(false);
+    // The out-of-band flip landed it back on PLAYING; the stale PAUSE
+    // proposal must not have flipped it again.
+    expect(getCurrentPlayback(db, roomId)?.status).toBe("PLAYING");
+  });
+
+  // --- Play proposal while already playing / Pause while already paused --
+
+  it("rejects a PLAY proposal request when the room is already playing", () => {
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+
+    const result = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "PLAY", { votingWindowMs: 5_000 });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/already playing/);
+  });
+
+  it("rejects a PAUSE proposal request when the room is already paused", () => {
+    setPlaybackStatus(db, roomId, "PAUSED");
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+
+    const result = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "PAUSE", { votingWindowMs: 5_000 });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/already paused/);
+  });
+
+  // --- participant disconnect during vote --------------------------------
+
+  it("resolves normally when a voter never casts a ballot (equivalent to a disconnect mid-vote)", async () => {
+    // Carol never votes at all here — from the engine's point of view this
+    // is indistinguishable from Carol having disconnected before voting: her
+    // absence is simply an ABSTAIN, excluded from the denominator, and does
+    // not block the other two votes from resolving the proposal.
+    const manager = new ProposalManager();
+    const { io, emitted } = fakeIo();
+
+    const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "PAUSE", {
+      votingWindowMs: 20,
+    });
+    expect(requested.ok).toBe(true);
+    if (!requested.ok) return;
+    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+    void carol;
+
+    await sleep(60);
+
+    expect(getCurrentPlayback(db, roomId)?.status).toBe("PAUSED");
+    const resolutions = emitted.filter((e) => e.event === "proposal:update").map((e) => e.payload as ProposalBroadcast);
+    expect(resolutions[resolutions.length - 1].proposal.state).toBe("PASSED");
+  });
+
+  it("a vote cast after the window has closed is rejected and does not affect the outcome", async () => {
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+
+    const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "PAUSE", {
+      votingWindowMs: 20,
+    });
+    expect(requested.ok).toBe(true);
+    if (!requested.ok) return;
+
+    await sleep(60);
+
+    const lateVote = manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+    expect(lateVote.ok).toBe(false);
+  });
+
+  it("rejects a vote referencing a proposalId that isn't the room's current active proposal", () => {
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+
+    const result = manager.castVote(io, roomId, "not-a-real-id", bob.accountId, "YES");
+    expect(result.ok).toBe(false);
+  });
+
+  it("keeps proposals in separate rooms fully independent", async () => {
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+
+    const otherRoomId = createRoom(db, {
+      accountId: bob.accountId,
+      name: "Other room",
+      visibility: "PUBLIC",
+      autoCloseEnabled: false,
+    }).roomId;
+    const item = await addTrack(db, otherRoomId, bob.accountId, SONG_ID, { resolveMetadata });
+    ensureCurrentTrack(db, otherRoomId, item.queueItemId);
+
+    const first = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "PAUSE", { votingWindowMs: 5_000 });
+    const second = manager.requestPlaybackProposal(io, db, otherRoomId, bob.accountId, "PAUSE", {
+      votingWindowMs: 5_000,
+    });
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+  });
+
+  it("rejects a proposal request in a room with nothing currently playing", () => {
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+
+    const emptyRoomId = createRoom(db, {
+      accountId: alice.accountId,
+      name: "Empty room",
+      visibility: "PUBLIC",
+      autoCloseEnabled: false,
+    }).roomId;
+
+    const result = manager.requestPlaybackProposal(io, db, emptyRoomId, alice.accountId, "PLAY", {
+      votingWindowMs: 5_000,
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  // --- SKIP ----------------------------------------------------------------
+
+  it("a SKIP proposal references the current playback (kind + playbackId)", () => {
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+    const before = getCurrentPlayback(db, roomId)!;
+
+    const result = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "SKIP", {
+      votingWindowMs: 5_000,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.proposal.reference).toEqual({
+      kind: "playback",
+      playbackId: before.playbackId,
+      revision: before.revision,
+    });
+  });
+
+  it("advances to the next queue item, assigns a new playbackId, and updates the DJ when a SKIP proposal passes", async () => {
+    const manager = new ProposalManager();
+    const { io, emitted } = fakeIo();
+    const before = getCurrentPlayback(db, roomId)!;
+
+    const nextItem = await addTrack(db, roomId, bob.accountId, SONG_ID, { resolveMetadata });
+
+    const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "SKIP", {
+      votingWindowMs: 20,
+    });
+    expect(requested.ok).toBe(true);
+    if (!requested.ok) return;
+    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+
+    await sleep(60);
+
+    const after = getCurrentPlayback(db, roomId);
+    expect(after?.queueItemId).toBe(nextItem.queueItemId);
+    expect(after?.playbackId).not.toBe(before.playbackId);
+    expect(after?.status).toBe("PLAYING");
+    expect(after?.dj.accountId).toBe(bob.accountId);
+
+    const resolutions = emitted.filter((e) => e.event === "proposal:update").map((e) => e.payload as ProposalBroadcast);
+    const final = resolutions[resolutions.length - 1];
+    expect(final.proposal.state).toBe("PASSED");
+    expect(final.applied).toBe(true);
+    expect(emitted.some((e) => e.event === "playback:update")).toBe(true);
+  });
+
+  it("a SKIP proposal that goes stale before resolving is never applied, and never skips the track that's now actually playing", async () => {
+    // Three tracks queued: the one already playing (A, from beforeEach), B,
+    // and C. A SKIP proposal is opened while A is current (referencing A).
+    // Before it resolves, something else (simulated directly here, but
+    // equally an unrelated natural end or a second SKIP) advances playback
+    // to B. The stale SKIP-on-A proposal must not then also advance B to C
+    // — one vote about one track must never affect the next.
+    const manager = new ProposalManager();
+    const { io, emitted } = fakeIo();
+
+    await addTrack(db, roomId, bob.accountId, SONG_ID, { resolveMetadata }); // B
+    await addTrack(db, roomId, bob.accountId, SONG_ID, { resolveMetadata }); // C
+
+    const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "SKIP", {
+      votingWindowMs: 30,
+    });
+    expect(requested.ok).toBe(true);
+    if (!requested.ok) return;
+    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+
+    const movedToB = advanceToNextTrack(db, roomId);
+
+    await sleep(60);
+
+    const final = getCurrentPlayback(db, roomId);
+    // Still on B — the stale SKIP-on-A proposal did not additionally skip to C.
+    expect(final?.playbackId).toBe(movedToB?.playbackId);
+    expect(final?.queueItemId).toBe(movedToB?.queueItemId);
+
+    const resolutions = emitted.filter((e) => e.event === "proposal:update").map((e) => e.payload as ProposalBroadcast);
+    const last = resolutions[resolutions.length - 1];
+    expect(last.proposal.state).toBe("PASSED");
+    expect(last.applied).toBe(false);
+  });
+
+  it("invalidates an open SKIP proposal immediately when its track naturally ends, and advances to the next item exactly once", async () => {
+    const manager = new ProposalManager();
+    const { io, emitted } = fakeIo();
+    const before = getCurrentPlayback(db, roomId)!;
+    const nextItem = await addTrack(db, roomId, bob.accountId, SONG_ID, { resolveMetadata });
+
+    const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "SKIP", {
+      votingWindowMs: 30,
+    });
+    expect(requested.ok).toBe(true);
+
+    manager.handleTrackEnded(io, db, roomId, before.playbackId);
+
+    // Invalidated synchronously: no more active proposal, and the room has
+    // already moved on, well before the original 30ms window would fire.
+    expect(manager.getActiveProposal(roomId)).toBeNull();
+    const afterEnd = getCurrentPlayback(db, roomId);
+    expect(afterEnd?.queueItemId).toBe(nextItem.queueItemId);
+
+    const invalidated = emitted
+      .filter((e) => e.event === "proposal:update")
+      .map((e) => e.payload as ProposalBroadcast)
+      .at(-1)!;
+    expect(invalidated.proposal.state).toBe("FAILED");
+    expect(invalidated.applied).toBe(false);
+
+    // The original timer must genuinely be cancelled, not merely ignored:
+    // waiting past the original window must produce no further transition.
+    await sleep(60);
+    expect(getCurrentPlayback(db, roomId)?.queueItemId).toBe(nextItem.queueItemId);
+    expect(emitted.filter((e) => e.event === "playback:update")).toHaveLength(1);
+  });
+
+  it("ignores a playback:ended report whose playbackId does not match the room's current playback", () => {
+    const manager = new ProposalManager();
+    const { io, emitted } = fakeIo();
+    const before = getCurrentPlayback(db, roomId)!;
+
+    manager.handleTrackEnded(io, db, roomId, "not-the-real-playback-id");
+
+    expect(getCurrentPlayback(db, roomId)?.playbackId).toBe(before.playbackId);
+    expect(emitted).toHaveLength(0);
+  });
+
+  it("treats a second playback:ended report for the same (now superseded) track as stale and does not double-advance", async () => {
+    // Simulates two clients whose players both reach the end around the
+    // same moment and both report it.
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+    const before = getCurrentPlayback(db, roomId)!;
+    const b = await addTrack(db, roomId, bob.accountId, SONG_ID, { resolveMetadata });
+    await addTrack(db, roomId, bob.accountId, SONG_ID, { resolveMetadata }); // C, should never be reached
+
+    manager.handleTrackEnded(io, db, roomId, before.playbackId);
+    const afterFirst = getCurrentPlayback(db, roomId);
+    expect(afterFirst?.queueItemId).toBe(b.queueItemId);
+
+    // Second, late report still names the now-superseded playbackId.
+    manager.handleTrackEnded(io, db, roomId, before.playbackId);
+    const afterSecond = getCurrentPlayback(db, roomId);
+    expect(afterSecond?.queueItemId).toBe(b.queueItemId);
+    expect(afterSecond?.playbackId).toBe(afterFirst?.playbackId);
+  });
+
+  it("a track added to the queue mid-vote does not change what an in-flight SKIP proposal skips to", async () => {
+    // B is already queued before the vote opens, so it is the legitimate
+    // "next" track; C is added only after the vote is already open. The
+    // proposal itself carries no snapshot of "next" — getNextTrack is
+    // consulted fresh at resolution time — so this also doubles as coverage
+    // for "queue update concurrent with an open proposal".
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+    const b = await addTrack(db, roomId, bob.accountId, SONG_ID, { resolveMetadata });
+
+    const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "SKIP", {
+      votingWindowMs: 30,
+    });
+    expect(requested.ok).toBe(true);
+    if (!requested.ok) return;
+    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+
+    await addTrack(db, roomId, bob.accountId, SONG_ID, { resolveMetadata }); // C, added mid-vote
+
+    await sleep(60);
+
+    expect(getCurrentPlayback(db, roomId)?.queueItemId).toBe(b.queueItemId);
+  });
+
+  it("lets the current DJ open a SEEK proposal that, once passed, rebases the anchor without changing playbackId", async () => {
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+    const before = getCurrentPlayback(db, roomId)!;
+
+    // alice added the currently-playing track in beforeEach, so she is the DJ.
+    const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "SEEK", {
+      votingWindowMs: 30,
+      positionMs: 42_000,
+    });
+    expect(requested.ok).toBe(true);
+    if (!requested.ok) return;
+    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+
+    await sleep(60);
+
+    const after = getCurrentPlayback(db, roomId)!;
+    expect(after.playbackId).toBe(before.playbackId); // a seek is not a track transition
+    expect(after.anchorPositionMs).toBe(42_000);
+    expect(after.revision).toBe(before.revision + 1);
+    expect(after.status).toBe(before.status);
+    expect(manager.getActiveProposal(roomId)).toBeNull();
+  });
+
+  it("rejects a SEEK request from an account that is not the current DJ with a typed NOT_CURRENT_DJ error", () => {
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+
+    // bob did not add the currently-playing track — alice did.
+    const result = manager.requestPlaybackProposal(io, db, roomId, bob.accountId, "SEEK", {
+      votingWindowMs: 30,
+      positionMs: 10_000,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.code).toBe("NOT_CURRENT_DJ");
+    expect(manager.getActiveProposal(roomId)).toBeNull();
+  });
+
+  it("rejects a SEEK request with a negative target position before ever opening a vote", () => {
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+
+    const result = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "SEEK", {
+      votingWindowMs: 30,
+      positionMs: -1,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/non-negative/);
+    expect(manager.getActiveProposal(roomId)).toBeNull();
+  });
+
+  it("does not apply a passed SEEK proposal whose reference has gone stale by resolution time", async () => {
+    const manager = new ProposalManager();
+    const { io, emitted } = fakeIo();
+
+    const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "SEEK", {
+      votingWindowMs: 30,
+      positionMs: 99_000,
+    });
+    expect(requested.ok).toBe(true);
+    if (!requested.ok) return;
+    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+
+    // Something else rebases playback (bumping revision) while the vote is
+    // still open — by resolution time the proposal's reference is stale.
+    const rebased = setPlaybackStatus(db, roomId, "PAUSED")!;
+
+    await sleep(60);
+
+    const final = getCurrentPlayback(db, roomId)!;
+    expect(final.anchorPositionMs).toBe(rebased.anchorPositionMs); // not overwritten by the stale seek
+    const resolution = emitted.find(
+      (e) => e.event === "proposal:update" && (e.payload as ProposalBroadcast).proposal.state === "PASSED",
+    );
+    expect((resolution?.payload as ProposalBroadcast).applied).toBe(false);
+  });
+
+});
+
+describe("ProposalManager timer bookkeeping", () => {
+  it("forceResolve is idempotent once a room's proposal has already resolved", async () => {
+    vi.useRealTimers();
+    const dir = mkdtempSync(path.join(tmpdir(), "echo-room-proposals-timer-"));
+    const db = openDatabase(path.join(dir, "echo-room.sqlite"));
+    try {
+      const alice = registerAccount(db, "client-alice", "Alice");
+      const room = createRoom(db, { accountId: alice.accountId, name: "Room", visibility: "PUBLIC", autoCloseEnabled: false });
+      const resolveMetadata = async (videoId: string): Promise<YoutubeVideoMetadata | null> => ({
+        videoId,
+        title: "Song",
+        channelTitle: "Channel",
+        thumbnailUrl: "https://example.com/x.jpg",
+        embeddable: true,
+      });
+      const item = await addTrack(db, room.roomId, alice.accountId, SONG_ID, { resolveMetadata });
+      ensureCurrentTrack(db, room.roomId, item.queueItemId);
+
+      const manager = new ProposalManager();
+      const { io } = fakeIo();
+      manager.requestPlaybackProposal(io, db, room.roomId, alice.accountId, "PAUSE", { votingWindowMs: 10 });
+      await sleep(40);
+      expect(manager.getActiveProposal(room.roomId)).toBeNull();
+
+      // Calling forceResolve again with nothing active must be a safe no-op.
+      manager.forceResolve(io, db, room.roomId);
+      expect(manager.getActiveProposal(room.roomId)).toBeNull();
+    } finally {
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

@@ -1,13 +1,8 @@
-import { useEffect, useState } from "react";
-import type {
-  Account,
-  HealthResponse,
-  RoomPlaybackSnapshot,
-  YoutubeSearchResult,
-  YoutubeVideoMetadata,
-} from "../../shared/src/types.ts";
+import { useEffect, useRef, useState } from "react";
+import type { Account, HealthResponse, YoutubeSearchResult, YoutubeVideoMetadata } from "../../shared/src/types.ts";
 import { getClientId } from "./clientId.ts";
-import { YoutubePlayer } from "./YoutubePlayer.tsx";
+import { usePlaybackSync } from "./usePlaybackSync.ts";
+import { YoutubePlayer, type YoutubePlayerHandle } from "./YoutubePlayer.tsx";
 
 type HealthState = HealthResponse | "error" | null;
 
@@ -25,7 +20,12 @@ function App() {
   const [resolveError, setResolveError] = useState<string | null>(null);
 
   const [roomIdInput, setRoomIdInput] = useState("");
-  const [playback, setPlayback] = useState<RoomPlaybackSnapshot | "error" | null>(null);
+  const [liveRoomId, setLiveRoomId] = useState<string | null>(null);
+  const [seekSecondsInput, setSeekSecondsInput] = useState("");
+  const playerRef = useRef<YoutubePlayerHandle | null>(null);
+
+  const accountId = account && account !== "error" ? account.accountId : null;
+  const live = usePlaybackSync(liveRoomId, accountId, getClientId(), playerRef);
 
   useEffect(() => {
     fetch("/api/health")
@@ -95,27 +95,25 @@ function App() {
     }
   };
 
-  // Submitted explicitly (there's no room-join flow in this client yet) —
-  // just enough plumbing to display a room's current-track/DJ/next-track
-  // state, which is all this phase asks for.
-  const loadPlayback = async (e: React.FormEvent) => {
+  // Joining is just handing the roomId to usePlaybackSync — it's the socket
+  // itself (via room:join) that actually validates/enters the room, so there
+  // is nothing to await here.
+  const joinLiveRoom = (e: React.FormEvent) => {
     e.preventDefault();
     const id = roomIdInput.trim();
     if (!id) return;
-    try {
-      const res = await fetch(`/api/rooms/${encodeURIComponent(id)}/playback`);
-      if (!res.ok) throw new Error(await res.text());
-      setPlayback((await res.json()) as RoomPlaybackSnapshot);
-    } catch {
-      setPlayback("error");
-    }
+    setLiveRoomId(id);
   };
 
   return (
     <main>
       <h1>Echo Room</h1>
 
-      <YoutubePlayer videoId={videoId} />
+      <YoutubePlayer
+        ref={playerRef}
+        videoId={live.playback?.videoId ?? videoId}
+        onStateChange={live.handlePlayerStateChange}
+      />
 
       <section>
         <h2>Paste a YouTube link</h2>
@@ -167,32 +165,113 @@ function App() {
       </section>
 
       <section>
-        <h2>Now playing</h2>
-        <form onSubmit={loadPlayback}>
+        <h2>Room (live sync)</h2>
+        <form onSubmit={joinLiveRoom}>
           <input value={roomIdInput} onChange={(e) => setRoomIdInput(e.target.value)} placeholder="roomId" />
-          <button type="submit">View room</button>
+          <button type="submit" disabled={!accountId}>
+            Join room
+          </button>
         </form>
-        {playback === "error" && <p role="alert">could not load that room's playback</p>}
-        {playback && playback !== "error" && (
+        {!accountId && <p>register a display name above before joining a room</p>}
+        {live.joinError && <p role="alert">{live.joinError}</p>}
+
+        {liveRoomId && (
           <>
-            {playback.current ? (
+            <p>{live.connected ? "connected" : "connecting…"}</p>
+
+            <p>Present: {live.presence.map((p) => p.displayName).join(", ") || "nobody yet"}</p>
+
+            {live.playback ? (
               <div>
                 <p>
-                  Current track: {playback.current.title} — {playback.current.channelTitle}
+                  Current track: {live.playback.title} — {live.playback.channelTitle}
                 </p>
-                <p>DJ: {playback.current.dj.displayName}</p>
-                <p>playbackId: {playback.current.playbackId}</p>
+                <p>DJ: {live.playback.dj.displayName}</p>
+                <p>
+                  status: {live.playback.status} · playbackId: {live.playback.playbackId} · revision:{" "}
+                  {live.playback.revision}
+                </p>
+
+                {live.activeProposal ? (
+                  (() => {
+                    const proposal = live.activeProposal!;
+                    return (
+                      <div>
+                        <p>
+                          Vote in progress: {proposal.type} (
+                          {proposal.state === "OPEN" ? "voting…" : proposal.state === "PASSED" ? "passed" : "failed"})
+                        </p>
+                        <p>
+                          YES: {Object.values(proposal.votes).filter((v) => v === "YES").length} · NO:{" "}
+                          {Object.values(proposal.votes).filter((v) => v === "NO").length}
+                        </p>
+                        {proposal.state === "OPEN" && accountId && !(accountId in proposal.votes) && (
+                          <>
+                            <button type="button" onClick={() => live.castProposalVote(proposal.proposalId, "YES")}>
+                              Vote YES
+                            </button>
+                            <button type="button" onClick={() => live.castProposalVote(proposal.proposalId, "NO")}>
+                              Vote NO
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    );
+                  })()
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => live.requestPlaybackProposal("PLAY")}
+                      disabled={live.playback.status === "PLAYING"}
+                    >
+                      ▶ Propose Play
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => live.requestPlaybackProposal("PAUSE")}
+                      disabled={live.playback.status === "PAUSED"}
+                    >
+                      ⏸ Propose Pause
+                    </button>
+                    <button type="button" onClick={() => live.requestPlaybackProposal("SKIP")}>
+                      ⏭ Propose Skip
+                    </button>
+                    {accountId === live.playback.dj.accountId && (
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          const seconds = Number(seekSecondsInput);
+                          if (!Number.isFinite(seconds) || seconds < 0) return;
+                          live.requestSeekProposal(Math.round(seconds * 1000));
+                        }}
+                      >
+                        <input
+                          type="number"
+                          min="0"
+                          value={seekSecondsInput}
+                          onChange={(e) => setSeekSecondsInput(e.target.value)}
+                          placeholder="seconds"
+                        />
+                        <button type="submit">⏩ Propose Seek</button>
+                      </form>
+                    )}
+                  </>
+                )}
+                {live.proposalError && <p role="alert">{live.proposalError}</p>}
               </div>
             ) : (
               <p>nothing is currently playing</p>
             )}
-            {playback.next ? (
-              <p>
-                Next: {playback.next.title} — {playback.next.channelTitle}
-              </p>
-            ) : (
-              <p>queue has nothing lined up next</p>
-            )}
+
+            <p>Queue ({live.queue.length}):</p>
+            <ul>
+              {live.queue.map((item) => (
+                <li key={item.queueItemId}>
+                  {item.title} — {item.channelTitle}
+                </li>
+              ))}
+            </ul>
           </>
         )}
       </section>

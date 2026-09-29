@@ -72,21 +72,47 @@ export function openDatabase(dbPath: string): DatabaseSync {
   `);
 
   // The currently-playing queue item, one row per room (no row = nothing
-  // currently playing). playbackId identifies this particular "now playing"
-  // instance — it changes on every track transition even if the same
-  // queueItemId were ever to play again — so it, not queueItemId or roomId,
-  // is what a future vote/skip proposal must reference to detect staleness.
-  // The DJ for the current track is never stored here: it's always looked up
-  // live as queue_items.addedBy for this row's queueItemId, so it belongs to
-  // the track (not permanently to the room) and can't drift out of sync.
+  // currently playing), plus the server-authoritative sync anchor: status,
+  // anchorPositionMs and anchorServerTimeMs let a client calculate its
+  // expected position (see shared/src/playbackSync.ts) without the server
+  // ever broadcasting currentTime continuously. playbackId identifies this
+  // particular "now playing" instance — it changes only on a track
+  // transition, even if the same queueItemId were ever to play again.
+  // revision identifies this particular playback *control* state and
+  // advances on every anchor rebase (play/pause/seek, track transition, or a
+  // server-restart recovery) — it never resets, including across a track
+  // change. A future vote/skip proposal must reference both {playbackId,
+  // revision} to detect staleness (see isStaleReference). The DJ for the
+  // current track is never stored here: it's always looked up live as
+  // queue_items.addedBy for this row's queueItemId, so it belongs to the
+  // track (not permanently to the room) and can't drift out of sync.
   db.exec(`
     CREATE TABLE IF NOT EXISTS room_playback (
-      roomId      TEXT PRIMARY KEY REFERENCES rooms(roomId),
-      playbackId  TEXT NOT NULL,
-      queueItemId TEXT NOT NULL REFERENCES queue_items(queueItemId),
-      startedAt   TEXT NOT NULL
+      roomId             TEXT PRIMARY KEY REFERENCES rooms(roomId),
+      playbackId         TEXT NOT NULL,
+      queueItemId        TEXT NOT NULL REFERENCES queue_items(queueItemId),
+      startedAt          TEXT NOT NULL,
+      status             TEXT NOT NULL CHECK (status IN ('PLAYING', 'PAUSED')),
+      anchorPositionMs    INTEGER NOT NULL,
+      anchorServerTimeMs INTEGER NOT NULL,
+      revision           INTEGER NOT NULL
     )
   `);
+
+  // A room_playback table created before these sync columns existed (an
+  // earlier phase's database file) won't have them — CREATE TABLE IF NOT
+  // EXISTS is a no-op against an existing table, schema mismatches and all.
+  // ALTER TABLE ADD COLUMN itself isn't idempotent (it throws if the column
+  // already exists), hence the explicit check.
+  const existingColumns = new Set(
+    (db.prepare("PRAGMA table_info(room_playback)").all() as { name: string }[]).map((c) => c.name),
+  );
+  if (!existingColumns.has("status")) {
+    db.exec("ALTER TABLE room_playback ADD COLUMN status TEXT NOT NULL DEFAULT 'PAUSED'");
+    db.exec("ALTER TABLE room_playback ADD COLUMN anchorPositionMs INTEGER NOT NULL DEFAULT 0");
+    db.exec("ALTER TABLE room_playback ADD COLUMN anchorServerTimeMs INTEGER NOT NULL DEFAULT 0");
+    db.exec("ALTER TABLE room_playback ADD COLUMN revision INTEGER NOT NULL DEFAULT 1");
+  }
 
   return db;
 }

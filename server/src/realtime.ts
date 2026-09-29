@@ -1,8 +1,11 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { Server, Socket } from "socket.io";
 import type { RoomJoinPayload, RoomSnapshot } from "../../shared/src/types.ts";
+import type { VoteChoice } from "../../shared/src/voting.ts";
 import { getAccountByClientId } from "./accounts.ts";
+import { getCurrentPlayback } from "./playback.ts";
 import { PresenceStore } from "./presence.ts";
+import { ProposalManager } from "./proposals.ts";
 import { listQueue } from "./queue.ts";
 import { joinRoom, RoomClosedError, RoomFullError, RoomNotFoundError } from "./rooms.ts";
 
@@ -13,13 +16,28 @@ interface SocketData {
   roomId: string | null;
 }
 
+export interface AttachRealtimeOptions {
+  // Overrides the voting engine's 15-second default. Test-only seam (set by
+  // the server, never by a client) so integration tests can exercise a full
+  // propose→vote→resolve cycle without a real 15-second wait.
+  votingWindowMs?: number;
+}
+
+export interface RealtimeHandles {
+  presence: PresenceStore;
+  // Exposed so a test can call proposals.dispose() to cancel any pending
+  // resolution timers before closing its scratch database — production code
+  // (index.ts) has no need to touch this directly.
+  proposals: ProposalManager;
+}
+
 // Wires Socket.IO into the app: identifies each connection against an
 // already-registered account (never trusting a bare claimed accountId — see
 // CLAUDE.md's Authority section), then tracks room presence and relays
-// real-time room events. Returns the PresenceStore so the caller (index.ts)
-// can also broadcast on it from REST routes (e.g. a queue addition).
-export function attachRealtime(io: Server, db: DatabaseSync): PresenceStore {
+// real-time room events.
+export function attachRealtime(io: Server, db: DatabaseSync, options: AttachRealtimeOptions = {}): RealtimeHandles {
   const presence = new PresenceStore();
+  const proposals = new ProposalManager();
 
   io.use((socket, next) => {
     const auth = socket.handshake.auth as { accountId?: unknown; clientId?: unknown };
@@ -95,6 +113,8 @@ export function attachRealtime(io: Server, db: DatabaseSync): PresenceStore {
         room,
         queue: listQueue(db, roomId),
         presence: presence.list(roomId),
+        activeProposal: proposals.getActiveProposal(roomId),
+        playback: getCurrentPlayback(db, roomId),
       };
       socket.emit("room:snapshot", snapshot);
 
@@ -103,10 +123,70 @@ export function attachRealtime(io: Server, db: DatabaseSync): PresenceStore {
       }
     });
 
+    // Requests a PLAY, PAUSE, SKIP or SEEK proposal — the client never sets
+    // playback status directly (CLAUDE.md's Authority section).
+    // ProposalManager enforces one active proposal per room, rejects a
+    // redundant Play-while-playing/Pause-while-paused request up front, and
+    // owns the real 15-second timer that resolves the vote server-side.
+    socket.on("proposal:request", (payload: { type?: unknown; positionMs?: unknown }) => {
+      if (!data.roomId) {
+        socket.emit("proposal:requestError", { error: "join a room before requesting a vote" });
+        return;
+      }
+      const type = payload?.type;
+      if (type !== "PLAY" && type !== "PAUSE" && type !== "SKIP" && type !== "SEEK") {
+        socket.emit("proposal:requestError", { error: "unsupported proposal type" });
+        return;
+      }
+      const positionMs = typeof payload?.positionMs === "number" ? payload.positionMs : undefined;
+      const result = proposals.requestPlaybackProposal(io, db, data.roomId, data.accountId, type, {
+        votingWindowMs: options.votingWindowMs,
+        positionMs,
+      });
+      if (!result.ok) {
+        socket.emit("proposal:requestError", { error: result.error, code: result.code });
+      }
+    });
+
+    socket.on("proposal:vote", (payload: { proposalId?: unknown; choice?: unknown }) => {
+      if (!data.roomId) {
+        socket.emit("proposal:voteError", { error: "join a room before voting" });
+        return;
+      }
+      const proposalId = typeof payload?.proposalId === "string" ? payload.proposalId : "";
+      const choice = payload?.choice;
+      if (!proposalId || (choice !== "YES" && choice !== "NO")) {
+        socket.emit("proposal:voteError", { error: "proposalId and a YES/NO choice are required" });
+        return;
+      }
+      const result = proposals.castVote(io, data.roomId, proposalId, data.accountId, choice as VoteChoice);
+      if (!result.ok) {
+        socket.emit("proposal:voteError", { error: result.error });
+      }
+    });
+
+    // A client reports its own player naturally reaching the end of a track
+    // — never something the server polls for, since the server has no
+    // player of its own. The reported playbackId is only ever a hint: it is
+    // matched against the room's actual current playback before anything
+    // happens (see ProposalManager.handleTrackEnded), so a stale report from
+    // a client that's fallen behind (or several clients all reporting the
+    // same real end) can never double-advance or affect the wrong track.
+    socket.on("playback:ended", (payload: { playbackId?: unknown }) => {
+      if (!data.roomId) return;
+      const playbackId = typeof payload?.playbackId === "string" ? payload.playbackId : "";
+      if (!playbackId) return;
+      proposals.handleTrackEnded(io, db, data.roomId, playbackId);
+    });
+
     socket.on("disconnect", () => {
+      // A participant disconnecting mid-vote is not special-cased: they
+      // simply stop being reachable for future ballots, exactly like anyone
+      // who never voted at all — their vote remains an ABSTAIN and the
+      // proposal still resolves on schedule from whoever did vote.
       leaveCurrentRoom(io, socket, data);
     });
   });
 
-  return presence;
+  return { presence, proposals };
 }

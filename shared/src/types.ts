@@ -3,6 +3,8 @@
 // tsconfig), so importing this file from either side has no runtime cost
 // and no build-ordering requirement.
 
+import type { Proposal } from "./voting.ts";
+
 export interface HealthResponse {
   status: "ok";
   uptime: number;
@@ -113,10 +115,14 @@ export interface PresenceEntry {
 // Handed to a socket right after it (re)joins a room — the authoritative
 // state at that moment: durable room config and queue, plus who's currently
 // present. A client's own locally-held state is never trusted over this.
+// activeProposal is included so a late joiner or a reconnecting client sees
+// an in-flight vote immediately, rather than only on its next proposal:update.
 export interface RoomSnapshot {
   room: Room;
   queue: QueueItem[];
   presence: PresenceEntry[];
+  activeProposal: Proposal | null;
+  playback: PlaybackState | null;
 }
 
 // Client -> server socket payload for joining/rejoining a room. accountId
@@ -126,12 +132,24 @@ export interface RoomJoinPayload {
   roomId: string;
 }
 
-// The currently-playing queue item. playbackId identifies this particular
-// "now playing" instance (distinct from queueItemId: it changes on every
-// track transition, so a future stale vote/skip proposal can be detected by
-// comparing playbackId, not by comparing queueItemId or a queue revision
-// alone). dj is always the account that originally added this queue item —
-// looked up live, never cached — so the DJ role belongs to the track, not
+export type PlaybackStatus = "PLAYING" | "PAUSED";
+
+// The currently-playing queue item, plus the server-authoritative anchor a
+// client uses to calculate expected playback position (see
+// shared/src/playbackSync.ts) instead of the server ever broadcasting
+// currentTime continuously.
+//
+// playbackId identifies this particular "now playing" instance — it changes
+// only on a track transition, even if the same queueItemId were ever to play
+// again. revision identifies this particular playback *control* state
+// (play/pause/seek) and advances on every anchor rebase, including within
+// the same track and across a server restart — it never resets. A proposal
+// (future voting layer) must reference both {playbackId, revision} at the
+// moment it's opened; if either has changed by the time it would execute,
+// the proposal is stale and must be rejected, never partially applied.
+//
+// dj is always the account that originally added this queue item — looked
+// up live, never cached — so the DJ role belongs to the track, not
 // permanently to the room, and is unaffected by that account's connection
 // state.
 export interface PlaybackState {
@@ -142,6 +160,10 @@ export interface PlaybackState {
   channelTitle: string;
   thumbnailUrl: string;
   startedAt: string;
+  status: PlaybackStatus;
+  anchorPositionMs: number;
+  anchorServerTimeMs: number;
+  revision: number;
   dj: { accountId: string; displayName: string };
 }
 

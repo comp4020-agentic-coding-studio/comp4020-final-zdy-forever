@@ -4,9 +4,17 @@ import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Account, YoutubeVideoMetadata } from "../../shared/src/types.ts";
+import { computeExpectedPositionMs } from "../../shared/src/playbackSync.ts";
 import { registerAccount } from "./accounts.ts";
 import { openDatabase } from "./db.ts";
-import { advanceToNextTrack, ensureCurrentTrack, getCurrentPlayback, getNextTrack } from "./playback.ts";
+import {
+  advanceToNextTrack,
+  ensureCurrentTrack,
+  getCurrentPlayback,
+  getNextTrack,
+  recoverPlaybackOnStartup,
+  setPlaybackStatus,
+} from "./playback.ts";
 import { PresenceStore } from "./presence.ts";
 import { addTrack } from "./queue.ts";
 import { createRoom } from "./rooms.ts";
@@ -162,5 +170,125 @@ describe("playback state and DJ role", () => {
     const next = getNextTrack(db, roomId);
     const other = current?.queueItemId === itemA.queueItemId ? itemB : itemA;
     expect(next?.queueItemId).toBe(other.queueItemId);
+  });
+
+  it("ensureCurrentTrack returns the started PlaybackState only when it actually started playback", async () => {
+    const item = await addTrack(db, roomId, alice.accountId, SONG_A_ID, { resolveMetadata });
+    const started = ensureCurrentTrack(db, roomId, item.queueItemId);
+    expect(started?.queueItemId).toBe(item.queueItemId);
+    expect(started?.status).toBe("PLAYING");
+    expect(started?.anchorPositionMs).toBe(0);
+    expect(started?.revision).toBe(1);
+
+    const second = await addTrack(db, roomId, bob.accountId, SONG_B_ID, { resolveMetadata });
+    expect(ensureCurrentTrack(db, roomId, second.queueItemId)).toBeNull();
+  });
+
+  it("a freshly started track begins PLAYING at position 0, and computeExpectedPositionMs agrees", async () => {
+    const before = Date.now();
+    await addAndMaybeStart(alice.accountId, SONG_A_ID);
+    const current = getCurrentPlayback(db, roomId)!;
+
+    expect(current.status).toBe("PLAYING");
+    expect(current.anchorPositionMs).toBe(0);
+    expect(current.anchorServerTimeMs).toBeGreaterThanOrEqual(before);
+    expect(computeExpectedPositionMs(current, current.anchorServerTimeMs)).toBe(0);
+  });
+
+  it("advancing to the next track carries revision forward rather than resetting it, while playbackId does change", async () => {
+    await addAndMaybeStart(alice.accountId, SONG_A_ID);
+    setPlaybackStatus(db, roomId, "PAUSED"); // bumps revision to 2
+    await addAndMaybeStart(bob.accountId, SONG_B_ID);
+
+    const before = getCurrentPlayback(db, roomId)!;
+    expect(before.revision).toBe(2);
+
+    const after = advanceToNextTrack(db, roomId)!;
+    expect(after.playbackId).not.toBe(before.playbackId);
+    expect(after.revision).toBe(before.revision + 1);
+    expect(after.status).toBe("PLAYING");
+    expect(after.anchorPositionMs).toBe(0);
+  });
+
+  describe("setPlaybackStatus", () => {
+    it("is a no-op (returns null) when nothing is currently playing", () => {
+      expect(setPlaybackStatus(db, roomId, "PAUSED")).toBeNull();
+    });
+
+    it("is a no-op (same revision) when the requested status already matches", async () => {
+      await addAndMaybeStart(alice.accountId, SONG_A_ID);
+      const before = getCurrentPlayback(db, roomId)!;
+      const result = setPlaybackStatus(db, roomId, "PLAYING");
+      expect(result?.revision).toBe(before.revision);
+      expect(result?.status).toBe("PLAYING");
+    });
+
+    it("pausing rebases the anchor at the expected position and bumps revision, and resuming continues from there", async () => {
+      await addAndMaybeStart(alice.accountId, SONG_A_ID);
+      const playing = getCurrentPlayback(db, roomId)!;
+
+      const paused = setPlaybackStatus(db, roomId, "PAUSED")!;
+      expect(paused.status).toBe("PAUSED");
+      expect(paused.revision).toBe(playing.revision + 1);
+      // Rebased at (approximately) the position it was playing at when paused
+      // — never negative, and consistent with computeExpectedPositionMs.
+      expect(paused.anchorPositionMs).toBeGreaterThanOrEqual(0);
+      expect(computeExpectedPositionMs(paused, paused.anchorServerTimeMs)).toBe(paused.anchorPositionMs);
+
+      // While paused, expected position never advances no matter how much
+      // later we ask.
+      expect(computeExpectedPositionMs(paused, paused.anchorServerTimeMs + 10_000)).toBe(paused.anchorPositionMs);
+
+      const resumed = setPlaybackStatus(db, roomId, "PLAYING")!;
+      expect(resumed.status).toBe("PLAYING");
+      expect(resumed.revision).toBe(paused.revision + 1);
+      // Resuming continues from exactly where it was paused, not reset to 0.
+      expect(resumed.anchorPositionMs).toBe(paused.anchorPositionMs);
+    });
+  });
+
+  describe("recoverPlaybackOnStartup", () => {
+    it("leaves an already-PAUSED room untouched", async () => {
+      await addAndMaybeStart(alice.accountId, SONG_A_ID);
+      const paused = setPlaybackStatus(db, roomId, "PAUSED")!;
+
+      recoverPlaybackOnStartup(db);
+
+      const after = getCurrentPlayback(db, roomId)!;
+      expect(after).toEqual(paused);
+    });
+
+    it("flips a PLAYING room to PAUSED, preserving anchorPositionMs exactly (no extrapolation through downtime)", async () => {
+      await addAndMaybeStart(alice.accountId, SONG_A_ID);
+      const playing = getCurrentPlayback(db, roomId)!;
+
+      recoverPlaybackOnStartup(db);
+
+      const recovered = getCurrentPlayback(db, roomId)!;
+      expect(recovered.status).toBe("PAUSED");
+      expect(recovered.anchorPositionMs).toBe(playing.anchorPositionMs);
+      expect(recovered.revision).toBe(playing.revision + 1);
+    });
+
+    it("survives a literal simulated restart: close the db, reopen it, then recover", async () => {
+      await addAndMaybeStart(alice.accountId, SONG_A_ID);
+      const playing = getCurrentPlayback(db, roomId)!;
+      db.close();
+
+      const reopened = openDatabase(dbPath);
+      recoverPlaybackOnStartup(reopened);
+      const recovered = getCurrentPlayback(reopened, roomId)!;
+      reopened.close();
+
+      // Re-point db to a fresh open so afterEach's db.close() doesn't throw.
+      db = openDatabase(dbPath);
+
+      expect(recovered.status).toBe("PAUSED");
+      expect(recovered.anchorPositionMs).toBe(playing.anchorPositionMs);
+    });
+
+    it("does nothing when no room has ever played anything", () => {
+      expect(() => recoverPlaybackOnStartup(db)).not.toThrow();
+    });
   });
 });

@@ -10,6 +10,8 @@ export interface AddTrackDeps {
   resolveMetadata?: (videoId: string) => Promise<YoutubeVideoMetadata | null>;
 }
 
+const QUEUE_ITEM_COLUMNS = "queueItemId, roomId, videoId, title, channelTitle, thumbnailUrl, addedBy, addedAt";
+
 function rowToQueueItem(row: unknown): QueueItem {
   return row as QueueItem;
 }
@@ -19,12 +21,7 @@ function rowToQueueItem(row: unknown): QueueItem {
 // mistake position-in-array for identity.
 export function listQueue(db: DatabaseSync, roomId: string): QueueItem[] {
   const rows = db
-    .prepare(
-      `SELECT queueItemId, roomId, videoId, title, channelTitle, thumbnailUrl, addedBy, addedAt
-         FROM queue_items
-        WHERE roomId = ?
-        ORDER BY rowid ASC`,
-    )
+    .prepare(`SELECT ${QUEUE_ITEM_COLUMNS} FROM queue_items WHERE roomId = ? ORDER BY rowid ASC`)
     .all(roomId);
   return rows.map(rowToQueueItem);
 }
@@ -32,8 +29,7 @@ export function listQueue(db: DatabaseSync, roomId: string): QueueItem[] {
 // input (a pasted URL, or a bare videoId handed back by search/demo songs) is
 // always independently re-parsed and re-resolved here — the server never
 // trusts client-supplied title/channelTitle/thumbnail, only the canonical
-// metadata it looks up itself (see CLAUDE.md's Authority section). Adding a
-// track never requires a vote.
+// metadata it looks up itself (see CLAUDE.md's Authority section).
 export async function addTrack(
   db: DatabaseSync,
   roomId: string,
