@@ -174,3 +174,16 @@ export interface RoomPlaybackSnapshot {
   current: PlaybackState | null;
   next: QueueItem | null;
 }
+
+// One account's reorder-token balance in one room (see CLAUDE.md's Reorder
+// section and shared/src/reorderTokens.ts). Always server-computed from a
+// persisted (tokens, anchorMs) pair plus the current clock — a client never
+// tracks or claims its own balance. nextRegenAt is when the next +1 tick
+// arrives, or null once already at maxTokens (there is nothing to wait for).
+export interface ReorderTokenBalance {
+  roomId: string;
+  accountId: string;
+  tokens: number;
+  maxTokens: number;
+  nextRegenAt: string | null;
+}

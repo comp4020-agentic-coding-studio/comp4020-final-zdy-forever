@@ -13,6 +13,7 @@ import type {
   LobbyRoom,
   QueueItem,
   RegisterRequest,
+  ReorderTokenBalance,
   Room,
   RoomPlaybackSnapshot,
   YoutubeVideoMetadata,
@@ -23,6 +24,7 @@ import { openDatabase } from "./db.ts";
 import { ensureCurrentTrack, getCurrentPlayback, getNextTrack, recoverPlaybackOnStartup } from "./playback.ts";
 import { addTrack, InvalidTrackError, listQueue } from "./queue.ts";
 import { attachRealtime } from "./realtime.ts";
+import { getReorderTokenBalance } from "./reorderTokenStore.ts";
 import {
   createRoom,
   getActiveRoomByCode,
@@ -267,6 +269,25 @@ app.get("/api/rooms/:roomId/playback", (req, res) => {
     next: getNextTrack(db, roomId),
   };
   res.json(snapshot);
+});
+
+// One account's server-authoritative reorder-token balance in this room (see
+// CLAUDE.md's Reorder section and shared/src/reorderTokens.ts) — a plain
+// query, never something a client tracks or reports itself. Reordering
+// itself isn't wired up yet; this only exposes the balance so a future
+// REORDER_QUEUE UI can show it.
+app.get("/api/rooms/:roomId/reorder-tokens/:accountId", (req, res) => {
+  const { roomId, accountId } = req.params;
+  if (!getRoomById(db, roomId)) {
+    res.status(404).json({ error: "room not found" });
+    return;
+  }
+  if (!getAccountById(db, accountId)) {
+    res.status(400).json({ error: "unknown accountId" });
+    return;
+  }
+  const balance: ReorderTokenBalance = getReorderTokenBalance(db, roomId, accountId);
+  res.json(balance);
 });
 
 // Search is submit-driven only — the client calls this once per explicit
