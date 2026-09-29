@@ -259,6 +259,11 @@ button {
   padding: 0.35rem 0.7rem;
   font-size: 0.85rem;
   border-radius: var(--radius-md);
+  /* Keep a ~44px touch target even though the padding/font above is small —
+     several of these (queue reorder/remove) are icon-only and tapped
+     directly on mobile. */
+  min-width: 2.75rem;
+  min-height: 2.75rem;
 }
 
 .btn--green {
@@ -488,10 +493,13 @@ form {
   background: rgba(0, 0, 0, 0.6);
 }
 
+/* Kept at the TOP of the player, not the bottom: YouTube's own control bar
+   (scrubber, play/pause, volume, fullscreen) sits at the bottom edge of the
+   iframe, and a fallback button placed there would sit on top of it. */
 .player-fallback-row {
   position: absolute;
   left: 0.75rem;
-  bottom: 0.75rem;
+  top: 0.75rem;
   display: flex;
   gap: 0.5rem;
 }
@@ -506,8 +514,8 @@ form {
 .reaction-button {
   font-size: 1.6rem;
   line-height: 1;
-  width: 2.6rem;
-  height: 2.6rem;
+  width: 2.75rem;
+  height: 2.75rem;
   border-radius: var(--radius-full);
   border: var(--border-w) solid var(--ink);
   background: #fff;

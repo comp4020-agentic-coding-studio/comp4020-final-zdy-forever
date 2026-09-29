@@ -159,6 +159,7 @@ function App() {
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
               placeholder="display name"
+              aria-label="display name"
               required
             />
             <button type="submit" className="btn btn--purple">
@@ -176,6 +177,7 @@ function App() {
             value={urlInput}
             onChange={(e) => setUrlInput(e.target.value)}
             placeholder="https://www.youtube.com/watch?v=…"
+            aria-label="YouTube link"
           />
           <button type="submit" className="btn btn--blue">
             Load
@@ -187,7 +189,12 @@ function App() {
       <div className="card card--accent-blue">
         <h2>🔍 Search YouTube</h2>
         <form onSubmit={search}>
-          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="search…" />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="search…"
+            aria-label="search YouTube"
+          />
           <button type="submit" className="btn btn--blue">
             Search
           </button>
@@ -225,7 +232,12 @@ function App() {
       <div className="card card--accent-green">
         <h2>🚪 Join a room</h2>
         <form onSubmit={joinLiveRoom}>
-          <input value={roomIdInput} onChange={(e) => setRoomIdInput(e.target.value)} placeholder="roomId" />
+          <input
+            value={roomIdInput}
+            onChange={(e) => setRoomIdInput(e.target.value)}
+            placeholder="roomId"
+            aria-label="room ID"
+          />
           <button type="submit" className="btn btn--green" disabled={!accountId}>
             Join room
           </button>
@@ -331,6 +343,7 @@ function App() {
                     value={seekSecondsInput}
                     onChange={(e) => setSeekSecondsInput(e.target.value)}
                     placeholder="seconds"
+                    aria-label="seek position in seconds"
                   />
                   <button type="submit" className="btn btn--purple">
                     ⏩ Propose Seek
@@ -406,6 +419,7 @@ function App() {
                   type="button"
                   className="btn btn--sm"
                   disabled={index === 0}
+                  aria-label={`move "${item.title}" up in the queue`}
                   onClick={() =>
                     live.requestReorderQueueProposal(item.queueItemId, live.queue[index - 1].queueItemId)
                   }
@@ -416,6 +430,7 @@ function App() {
                   type="button"
                   className="btn btn--sm"
                   disabled={index === live.queue.length - 1}
+                  aria-label={`move "${item.title}" down in the queue`}
                   onClick={() =>
                     live.requestReorderQueueProposal(
                       item.queueItemId,
@@ -432,6 +447,7 @@ function App() {
                   <button
                     type="button"
                     className="btn btn--sm btn--red"
+                    aria-label={`propose removing "${item.title}" from the queue`}
                     onClick={() => live.requestRemoveQueueItemProposal(item.queueItemId)}
                   >
                     🗑
@@ -465,6 +481,7 @@ function App() {
                     key={emoji}
                     type="button"
                     className="reaction-button"
+                    aria-label={`send ${emoji} reaction`}
                     onClick={() => live.sendReaction(emoji)}
                   >
                     {emoji}
