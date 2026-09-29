@@ -23,6 +23,14 @@ export function openDatabase(dbPath: string): DatabaseSync {
     )
   `);
 
+  // queueRevision is this room's queue *membership* counter (see
+  // shared/src/voting.ts's "queue" reference kind) — it advances whenever a
+  // REMOVE_QUEUE_ITEM (or, later, REORDER_QUEUE) proposal actually mutates
+  // the queue, so a REMOVE/REORDER proposal opened against an earlier
+  // revision can be detected as stale at resolution time. Adding a track
+  // deliberately does NOT bump this (see queue.ts's addTrack) — mirroring
+  // how adding to the queue never bumps room_playback.revision either, an
+  // unrelated addition must never invalidate an in-flight queue vote.
   db.exec(`
     CREATE TABLE IF NOT EXISTS rooms (
       roomId       TEXT PRIMARY KEY,
@@ -34,9 +42,17 @@ export function openDatabase(dbPath: string): DatabaseSync {
       autoCloseEnabled INTEGER NOT NULL,
       createdAt    TEXT NOT NULL,
       lastMeaningfulActivityAt TEXT NOT NULL,
-      closed       INTEGER NOT NULL DEFAULT 0
+      closed       INTEGER NOT NULL DEFAULT 0,
+      queueRevision INTEGER NOT NULL DEFAULT 1
     )
   `);
+
+  const existingRoomColumns = new Set(
+    (db.prepare("PRAGMA table_info(rooms)").all() as { name: string }[]).map((c) => c.name),
+  );
+  if (!existingRoomColumns.has("queueRevision")) {
+    db.exec("ALTER TABLE rooms ADD COLUMN queueRevision INTEGER NOT NULL DEFAULT 1");
+  }
 
   // A code is exclusive only while its room is active (closed = 0), so a
   // closed room's code is free for a new room to reuse.

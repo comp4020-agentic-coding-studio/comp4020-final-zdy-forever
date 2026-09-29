@@ -269,6 +269,17 @@ function App() {
               {live.queue.map((item) => (
                 <li key={item.queueItemId}>
                   {item.title} — {item.channelTitle}
+                  {/* The currently-playing item can never be removed via a vote
+                      here — see ProposalManager.requestRemoveQueueItem in
+                      server/src/proposals.ts; skip is the only way off it. */}
+                  {item.queueItemId !== live.playback?.queueItemId && (
+                    <button
+                      type="button"
+                      onClick={() => live.requestRemoveQueueItemProposal(item.queueItemId)}
+                    >
+                      🗑 Propose Remove
+                    </button>
+                  )}
                 </li>
               ))}
             </ul>

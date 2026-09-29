@@ -8,7 +8,7 @@ import { registerAccount } from "./accounts.ts";
 import { openDatabase } from "./db.ts";
 import { advanceToNextTrack, ensureCurrentTrack, getCurrentPlayback, setPlaybackStatus } from "./playback.ts";
 import { ProposalManager, type ProposalBroadcast } from "./proposals.ts";
-import { addTrack } from "./queue.ts";
+import { addTrack, getQueueRevision, listQueue, removeQueueItem } from "./queue.ts";
 import { createRoom } from "./rooms.ts";
 
 // A minimal io.Server stand-in: ProposalManager only ever calls
@@ -590,6 +590,172 @@ describe("ProposalManager", () => {
     expect((resolution?.payload as ProposalBroadcast).applied).toBe(false);
   });
 
+  it("removes a queue item once a REMOVE_QUEUE_ITEM vote passes, leaving unrelated items and current playback untouched", async () => {
+    const manager = new ProposalManager();
+    const { io, emitted } = fakeIo();
+    const current = getCurrentPlayback(db, roomId)!;
+    const b = await addTrack(db, roomId, bob.accountId, SONG_ID, { resolveMetadata });
+    const c = await addTrack(db, roomId, carol.accountId, SONG_ID, { resolveMetadata });
+
+    const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "REMOVE_QUEUE_ITEM", {
+      votingWindowMs: 30,
+      queueItemId: b.queueItemId,
+    });
+    expect(requested.ok).toBe(true);
+    if (!requested.ok) return;
+    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+
+    await sleep(60);
+
+    const queue = listQueue(db, roomId);
+    expect(queue.some((q) => q.queueItemId === b.queueItemId)).toBe(false);
+    expect(queue.some((q) => q.queueItemId === c.queueItemId)).toBe(true);
+    expect(getCurrentPlayback(db, roomId)?.queueItemId).toBe(current.queueItemId);
+
+    const resolution = emitted.find(
+      (e) => e.event === "proposal:update" && (e.payload as ProposalBroadcast).proposal.state === "PASSED",
+    );
+    expect((resolution?.payload as ProposalBroadcast).applied).toBe(true);
+    const removedEvent = emitted.find((e) => e.event === "queue:itemRemoved");
+    expect((removedEvent?.payload as { queueItemId: string }).queueItemId).toBe(b.queueItemId);
+    expect(manager.getActiveProposal(roomId)).toBeNull();
+  });
+
+  it("rejects a REMOVE_QUEUE_ITEM request targeting the currently-playing item with a typed IS_CURRENT_TRACK error", () => {
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+    const current = getCurrentPlayback(db, roomId)!;
+
+    const result = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "REMOVE_QUEUE_ITEM", {
+      votingWindowMs: 30,
+      queueItemId: current.queueItemId,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.code).toBe("IS_CURRENT_TRACK");
+    expect(manager.getActiveProposal(roomId)).toBeNull();
+  });
+
+  it("rejects a REMOVE_QUEUE_ITEM request for a queueItemId that does not exist in this room before ever opening a vote", () => {
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+
+    const result = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "REMOVE_QUEUE_ITEM", {
+      votingWindowMs: 30,
+      queueItemId: "not-a-real-queue-item-id",
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/no such queue item/);
+    expect(manager.getActiveProposal(roomId)).toBeNull();
+  });
+
+  it("does not apply a passed REMOVE_QUEUE_ITEM proposal once queueRevision has moved on mid-vote", async () => {
+    const manager = new ProposalManager();
+    const { io, emitted } = fakeIo();
+    const b = await addTrack(db, roomId, bob.accountId, SONG_ID, { resolveMetadata });
+    const c = await addTrack(db, roomId, carol.accountId, SONG_ID, { resolveMetadata });
+
+    const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "REMOVE_QUEUE_ITEM", {
+      votingWindowMs: 30,
+      queueItemId: b.queueItemId,
+    });
+    expect(requested.ok).toBe(true);
+    if (!requested.ok) return;
+    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+
+    // Something else (here, a second removal applied directly) bumps
+    // queueRevision while the vote on b is still open.
+    removeQueueItem(db, roomId, c.queueItemId);
+
+    await sleep(60);
+
+    const queue = listQueue(db, roomId);
+    expect(queue.some((q) => q.queueItemId === b.queueItemId)).toBe(true); // never removed — stale
+    const resolution = emitted.find(
+      (e) => e.event === "proposal:update" && (e.payload as ProposalBroadcast).proposal.state === "PASSED",
+    );
+    expect((resolution?.payload as ProposalBroadcast).applied).toBe(false);
+  });
+
+  it("falls back to execution-time defense-in-depth: never removes an item that became the current track mid-vote", async () => {
+    const manager = new ProposalManager();
+    const { io, emitted } = fakeIo();
+    const b = await addTrack(db, roomId, bob.accountId, SONG_ID, { resolveMetadata });
+
+    const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "REMOVE_QUEUE_ITEM", {
+      votingWindowMs: 30,
+      queueItemId: b.queueItemId,
+    });
+    expect(requested.ok).toBe(true);
+    if (!requested.ok) return;
+    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+
+    // b becomes the current track mid-vote (a SKIP passed elsewhere) — this
+    // never bumps queueRevision, so the REMOVE_QUEUE_ITEM proposal's
+    // queue-kind reference is not stale by the usual check; the execution-
+    // time defense-in-depth inside removeQueueItem must catch this instead.
+    advanceToNextTrack(db, roomId);
+    expect(getCurrentPlayback(db, roomId)?.queueItemId).toBe(b.queueItemId);
+
+    await sleep(60);
+
+    expect(listQueue(db, roomId).some((q) => q.queueItemId === b.queueItemId)).toBe(true); // never removed
+    const resolution = emitted.find(
+      (e) => e.event === "proposal:update" && (e.payload as ProposalBroadcast).proposal.state === "PASSED",
+    );
+    expect((resolution?.payload as ProposalBroadcast).applied).toBe(false);
+  });
+
+  it("a track added to the queue mid-vote does not invalidate an in-flight REMOVE_QUEUE_ITEM proposal for a different item", async () => {
+    const manager = new ProposalManager();
+    const { io, emitted } = fakeIo();
+    const b = await addTrack(db, roomId, bob.accountId, SONG_ID, { resolveMetadata });
+
+    const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "REMOVE_QUEUE_ITEM", {
+      votingWindowMs: 30,
+      queueItemId: b.queueItemId,
+    });
+    expect(requested.ok).toBe(true);
+    if (!requested.ok) return;
+    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+
+    await addTrack(db, roomId, carol.accountId, SONG_ID, { resolveMetadata }); // C, added mid-vote
+
+    await sleep(60);
+
+    expect(listQueue(db, roomId).some((q) => q.queueItemId === b.queueItemId)).toBe(false);
+    const resolution = emitted.find(
+      (e) => e.event === "proposal:update" && (e.payload as ProposalBroadcast).proposal.state === "PASSED",
+    );
+    expect((resolution?.payload as ProposalBroadcast).applied).toBe(true);
+  });
+
+  it("invalidates an open REMOVE_QUEUE_ITEM proposal immediately when its room's current track naturally ends", async () => {
+    const manager = new ProposalManager();
+    const { io, emitted } = fakeIo();
+    const before = getCurrentPlayback(db, roomId)!;
+    const b = await addTrack(db, roomId, bob.accountId, SONG_ID, { resolveMetadata });
+
+    const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "REMOVE_QUEUE_ITEM", {
+      votingWindowMs: 30,
+      queueItemId: b.queueItemId,
+    });
+    expect(requested.ok).toBe(true);
+    if (!requested.ok) return;
+    manager.castVote(io, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+
+    manager.handleTrackEnded(io, db, roomId, before.playbackId);
+
+    expect(manager.getActiveProposal(roomId)).toBeNull();
+    expect(listQueue(db, roomId).some((q) => q.queueItemId === b.queueItemId)).toBe(true); // never removed
+    const updates = emitted
+      .filter((e) => e.event === "proposal:update" && (e.payload as ProposalBroadcast).proposal.proposalId === requested.proposal.proposalId)
+      .map((e) => e.payload as ProposalBroadcast);
+    expect(updates[updates.length - 1].proposal.state).toBe("FAILED");
+  });
 });
 
 describe("ProposalManager timer bookkeeping", () => {

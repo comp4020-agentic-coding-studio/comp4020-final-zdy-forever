@@ -927,3 +927,139 @@ describe("realtime SEEK voting", () => {
     expect(getCurrentPlayback(db, roomId)?.anchorPositionMs).toBe(rebased.anchorPositionMs);
   });
 });
+
+describe("realtime REMOVE_QUEUE_ITEM voting", () => {
+  let dir: string;
+  let db: DatabaseSync;
+  let httpServer: ReturnType<typeof createServer>;
+  let io: Server;
+  let baseUrl: string;
+  let roomId: string;
+  let clients: ClientSocket[];
+  let alice: Account;
+  let bob: Account;
+  let proposals: ProposalManager;
+  let current: { queueItemId: string };
+
+  function makeAccount(clientId: string, displayName: string): Account {
+    return registerAccount(db, clientId, displayName);
+  }
+
+  function connect(account: Account, clientId: string): Promise<ClientSocket> {
+    return new Promise((resolve, reject) => {
+      const socket = ioClient(baseUrl, {
+        auth: { accountId: account.accountId, clientId },
+        transports: ["websocket"],
+        forceNew: true,
+      });
+      clients.push(socket);
+      socket.once("connect", () => resolve(socket));
+      socket.once("connect_error", (err) => reject(err));
+    });
+  }
+
+  function waitFor<T = unknown>(socket: ClientSocket, event: string): Promise<T> {
+    return new Promise((resolve) => socket.once(event, (payload: T) => resolve(payload)));
+  }
+
+  beforeEach(async () => {
+    dir = mkdtempSync(path.join(tmpdir(), "echo-room-realtime-remove-"));
+    db = openDatabase(path.join(dir, "echo-room.sqlite"));
+    clients = [];
+
+    httpServer = createServer();
+    io = new Server(httpServer);
+    ({ proposals } = attachRealtime(io, db, { votingWindowMs: 60 }));
+    await new Promise<void>((resolve) => httpServer.listen(0, resolve));
+    const { port } = httpServer.address() as AddressInfo;
+    baseUrl = `http://localhost:${port}`;
+
+    // Alice is the DJ throughout: she is the account that added the
+    // currently-playing track, per playback.ts's live-derived DJ field.
+    alice = makeAccount("client-alice", "Alice");
+    bob = makeAccount("client-bob", "Bob");
+    const room = createRoom(db, {
+      accountId: alice.accountId,
+      name: "Test room",
+      visibility: "PUBLIC",
+      autoCloseEnabled: false,
+    });
+    roomId = room.roomId;
+
+    const item = await addTrack(db, roomId, alice.accountId, "dQw4w9WgXcQ", {
+      resolveMetadata: async (videoId) => ({
+        videoId,
+        title: "Never Gonna Give You Up",
+        channelTitle: "Rick Astley",
+        thumbnailUrl: "https://example.com/thumb.jpg",
+        embeddable: true,
+      }),
+    });
+    ensureCurrentTrack(db, roomId, item.queueItemId);
+    current = item;
+  });
+
+  afterEach(async () => {
+    proposals.dispose();
+    for (const client of clients) client.close();
+    await new Promise<void>((resolve) => io.close(() => resolve()));
+    await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("runs the full REMOVE_QUEUE_ITEM propose → vote → resolve flow and broadcasts queue:itemRemoved", async () => {
+    const b = await addTrack(db, roomId, bob.accountId, "dQw4w9WgXcQ", {
+      resolveMetadata: async (videoId) => ({
+        videoId,
+        title: "Another Song",
+        channelTitle: "Someone Else",
+        thumbnailUrl: "https://example.com/thumb2.jpg",
+        embeddable: true,
+      }),
+    });
+
+    const aliceSocket = await connect(alice, "client-alice");
+    aliceSocket.emit("room:join", { roomId });
+    await waitFor(aliceSocket, "room:snapshot");
+
+    const bobSocket = await connect(bob, "client-bob");
+    bobSocket.emit("room:join", { roomId });
+    await waitFor(bobSocket, "room:snapshot");
+    await waitFor(aliceSocket, "presence:join");
+
+    const bobSeesOpen = waitFor<{ proposal: { proposalId: string; type: string; payload: unknown } }>(
+      bobSocket,
+      "proposal:update",
+    );
+    aliceSocket.emit("proposal:request", { type: "REMOVE_QUEUE_ITEM", queueItemId: b.queueItemId });
+    const opened = await bobSeesOpen;
+    expect(opened.proposal.type).toBe("REMOVE_QUEUE_ITEM");
+    expect(opened.proposal.payload).toEqual({ type: "REMOVE_QUEUE_ITEM", queueItemId: b.queueItemId });
+
+    const bobSeesVoteAck = waitFor<{ proposal: { state: string } }>(bobSocket, "proposal:update");
+    bobSocket.emit("proposal:vote", { proposalId: opened.proposal.proposalId, choice: "YES" });
+    await bobSeesVoteAck;
+
+    const aliceSeesItemRemoved = waitFor<{ queueItemId: string }>(aliceSocket, "queue:itemRemoved");
+    const resolved = await waitFor<{ proposal: { state: string }; applied: boolean }>(bobSocket, "proposal:update");
+    expect(resolved.proposal.state).toBe("PASSED");
+    expect(resolved.applied).toBe(true);
+
+    const removed = await aliceSeesItemRemoved;
+    expect(removed.queueItemId).toBe(b.queueItemId);
+    expect(getCurrentPlayback(db, roomId)?.queueItemId).toBe(current.queueItemId);
+  });
+
+  it("rejects a REMOVE_QUEUE_ITEM request targeting the currently-playing item with a typed IS_CURRENT_TRACK error and never opens a vote", async () => {
+    const aliceSocket = await connect(alice, "client-alice");
+    aliceSocket.emit("room:join", { roomId });
+    await waitFor(aliceSocket, "room:snapshot");
+
+    const requestError = waitFor<{ error: string; code?: string }>(aliceSocket, "proposal:requestError");
+    aliceSocket.emit("proposal:request", { type: "REMOVE_QUEUE_ITEM", queueItemId: current.queueItemId });
+    const err = await requestError;
+    expect(err.code).toBe("IS_CURRENT_TRACK");
+    expect(proposals.getActiveProposal(roomId)).toBeNull();
+  });
+});

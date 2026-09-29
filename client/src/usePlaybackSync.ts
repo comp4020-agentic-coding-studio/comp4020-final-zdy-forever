@@ -143,6 +143,14 @@ export function usePlaybackSync(
       setState((s) => (s.queue.some((q) => q.queueItemId === item.queueItemId) ? s : { ...s, queue: [...s.queue, item] }));
     });
 
+    // A passed REMOVE_QUEUE_ITEM vote actually removed this item (see
+    // ProposalManager.resolveRoom) — filtered by queueItemId, never by
+    // position, so this can never drop the wrong (unrelated) row even if the
+    // local queue array has drifted out of order relative to the server.
+    socket.on("queue:itemRemoved", ({ queueItemId }: { queueItemId: string }) => {
+      setState((s) => ({ ...s, queue: s.queue.filter((q) => q.queueItemId !== queueItemId) }));
+    });
+
     socket.on("presence:join", (entry: PresenceEntry) => {
       setState((s) => (s.presence.some((p) => p.accountId === entry.accountId) ? s : { ...s, presence: [...s.presence, entry] }));
     });
@@ -175,6 +183,16 @@ export function usePlaybackSync(
   // proposal:update/playback:update broadcast as everyone else.
   const requestSeekProposal = useCallback((positionMs: number) => {
     socketRef.current?.emit("proposal:request", { type: "SEEK", positionMs });
+  }, []);
+
+  // Requests a REMOVE_QUEUE_ITEM proposal for `queueItemId` — never an
+  // index/position (CLAUDE.md's Queue and DJ section). The server rejects a
+  // request targeting the currently-playing item with a typed
+  // IS_CURRENT_TRACK error (see ProposalManager.requestRemoveQueueItem) —
+  // use requestPlaybackProposal("SKIP") to move off the current track
+  // instead.
+  const requestRemoveQueueItemProposal = useCallback((queueItemId: string) => {
+    socketRef.current?.emit("proposal:request", { type: "REMOVE_QUEUE_ITEM", queueItemId });
   }, []);
 
   const castProposalVote = useCallback((proposalId: string, choice: VoteChoice) => {
@@ -237,6 +255,7 @@ export function usePlaybackSync(
     ...state,
     requestPlaybackProposal,
     requestSeekProposal,
+    requestRemoveQueueItemProposal,
     castProposalVote,
     handlePlayerStateChange,
   };

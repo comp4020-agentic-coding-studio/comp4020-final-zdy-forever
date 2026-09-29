@@ -14,10 +14,11 @@ import {
   type VoteChoice,
 } from "../../shared/src/voting.ts";
 import { advanceToNextTrack, getCurrentPlayback, seekPlayback, setPlaybackStatus } from "./playback.ts";
+import { getQueueItemById, getQueueRevision, removeQueueItem } from "./queue.ts";
 
-// Wires the pure voting engine (shared/src/voting.ts) to real playback state
-// and real-time broadcast for PLAY/PAUSE/SKIP/SEEK — REMOVE_QUEUE_ITEM and
-// REORDER_QUEUE are not connected yet. Owns the actual server-side clock: a
+// Wires the pure voting engine (shared/src/voting.ts) to real playback/queue
+// state and real-time broadcast for PLAY/PAUSE/SKIP/SEEK/REMOVE_QUEUE_ITEM —
+// REORDER_QUEUE is not connected yet. Owns the actual server-side clock: a
 // real setTimeout schedules resolution at expiresAt, so the 15-second window
 // is enforced by the server regardless of what any client claims about time.
 //
@@ -31,11 +32,13 @@ export interface ProposalBroadcast {
   applied: boolean;
 }
 
-// Machine-readable code for a request-time rejection a client needs to
+// Machine-readable codes for request-time rejections a client needs to
 // branch on (rather than just display): "only the current DJ may initiate
-// Seek" (CLAUDE.md's Voting section) — a client is expected to distinguish
-// this from an ordinary validation error.
-export type ProposalRequestErrorCode = "NOT_CURRENT_DJ";
+// Seek" (CLAUDE.md's Voting section), and a request to remove the room's
+// currently-playing queue item (see the "Current-track removal" comment on
+// requestPlaybackProposal below) — a client is expected to distinguish both
+// from an ordinary validation error.
+export type ProposalRequestErrorCode = "NOT_CURRENT_DJ" | "IS_CURRENT_TRACK";
 
 export type ProposalOutcome =
   | { ok: true; proposal: Proposal }
@@ -46,6 +49,10 @@ interface RequestOptions {
   // SEEK only: the DJ-chosen target position in ms. Never set by a client
   // for any other proposal type.
   positionMs?: number;
+  // REMOVE_QUEUE_ITEM only: the target item's stable id. Never a position/
+  // index — see CLAUDE.md's Queue and DJ section ("never use array index as
+  // identity").
+  queueItemId?: string;
 }
 
 // One active proposal per room at a time (CLAUDE.md's Reliability section:
@@ -65,11 +72,19 @@ export class ProposalManager {
     db: DatabaseSync,
     roomId: string,
     proposerAccountId: string,
-    type: "PLAY" | "PAUSE" | "SKIP" | "SEEK",
+    type: "PLAY" | "PAUSE" | "SKIP" | "SEEK" | "REMOVE_QUEUE_ITEM",
     options: RequestOptions = {},
   ): ProposalOutcome {
     if (this.active.has(roomId)) {
       return { ok: false, error: "a vote is already in progress in this room" };
+    }
+
+    // REMOVE_QUEUE_ITEM is queue-kind, not playback-kind (see the "Current-
+    // track removal" comment above requestRemoveQueueItem) — it never
+    // requires anything currently playing, so it branches off before the
+    // playback-kind checks below.
+    if (type === "REMOVE_QUEUE_ITEM") {
+      return this.requestRemoveQueueItem(io, db, roomId, proposerAccountId, options);
     }
 
     const playback = getCurrentPlayback(db, roomId);
@@ -106,7 +121,74 @@ export class ProposalManager {
 
     const payload: ProposalPayload = type === "SEEK" ? { type: "SEEK", positionMs: options.positionMs! } : { type };
     const reference: ProposalReference = { kind: "playback", playbackId: playback.playbackId, revision: playback.revision };
+    return this.openProposal(io, db, roomId, proposerAccountId, payload, reference, options.votingWindowMs);
+  }
 
+  // Current-track removal: REMOVE_QUEUE_ITEM may never target the room's
+  // currently-playing queue item. Moving off the current track is SKIP's job
+  // — it's a playback-state transition (track advance, DJ handoff, anchor
+  // reset), backed by SKIP's own playback-kind reference/staleness
+  // protection. Letting a queue-kind proposal also mutate playback state
+  // would mean one proposal is staleness-checked against only one of the two
+  // reference kinds it actually touches, weakening the "a stale vote can
+  // never partially apply" invariant this whole module depends on. So this is
+  // rejected outright, twice: here, at request time (typed "IS_CURRENT_TRACK"
+  // so the client can distinguish it from an ordinary validation error), and
+  // again, defensively, inside queue.ts's removeQueueItem itself at execution
+  // time — structurally unreachable there given the one-active-proposal-per-
+  // room invariant plus handleTrackEnded's invalidation of any open proposal
+  // on a natural track end, but checked anyway per this codebase's
+  // established defense-in-depth style.
+  private requestRemoveQueueItem(
+    io: Server,
+    db: DatabaseSync,
+    roomId: string,
+    proposerAccountId: string,
+    options: RequestOptions,
+  ): ProposalOutcome {
+    const queueItemId = options.queueItemId;
+    if (!queueItemId) {
+      return { ok: false, error: "queueItemId is required" };
+    }
+
+    const item = getQueueItemById(db, roomId, queueItemId);
+    if (!item) {
+      return { ok: false, error: "no such queue item in this room" };
+    }
+
+    const playback = getCurrentPlayback(db, roomId);
+    if (playback && playback.queueItemId === queueItemId) {
+      return {
+        ok: false,
+        error: "cannot remove the currently-playing track — use skip instead",
+        code: "IS_CURRENT_TRACK",
+      };
+    }
+
+    const reference: ProposalReference = { kind: "queue", queueRevision: getQueueRevision(db, roomId) };
+    return this.openProposal(
+      io,
+      db,
+      roomId,
+      proposerAccountId,
+      { type: "REMOVE_QUEUE_ITEM", queueItemId },
+      reference,
+      options.votingWindowMs,
+    );
+  }
+
+  // Shared "create + auto-YES-vote + schedule resolution + broadcast" logic
+  // for every proposal type, playback-kind or queue-kind alike — the only
+  // difference between callers is what payload/reference they open with.
+  private openProposal(
+    io: Server,
+    db: DatabaseSync,
+    roomId: string,
+    proposerAccountId: string,
+    payload: ProposalPayload,
+    reference: ProposalReference,
+    votingWindowMs: number | undefined,
+  ): ProposalOutcome {
     const nowMs = Date.now();
     let proposal = createProposal({
       proposalId: randomUUID(),
@@ -115,7 +197,7 @@ export class ProposalManager {
       createdAt: nowMs,
       payload,
       reference,
-      votingWindowMs: options.votingWindowMs ?? VOTING_WINDOW_MS,
+      votingWindowMs: votingWindowMs ?? VOTING_WINDOW_MS,
     });
 
     // The proposer implicitly votes YES for the action they just requested —
@@ -228,10 +310,15 @@ export class ProposalManager {
       return;
     }
 
-    // Never partially apply a passed vote against playback state it no
-    // longer describes — something else (another anchor rebase, a track
-    // transition) must have landed first.
-    const currentRef = this.currentPlaybackReference(db, roomId);
+    // Never partially apply a passed vote against state it no longer
+    // describes — something else (another anchor rebase, a track transition,
+    // a concurrent removal) must have landed first. The current reference
+    // must be built with the *same* kind as what this proposal referenced
+    // (playback for PLAY/PAUSE/SKIP/SEEK, queue for REMOVE_QUEUE_ITEM) —
+    // isProposalReferenceStale treats any kind mismatch as automatically
+    // stale, so comparing against the wrong kind would make every
+    // REMOVE_QUEUE_ITEM proposal appear stale and never execute.
+    const currentRef = this.currentReferenceFor(db, roomId, resolved.reference);
     if (!currentRef || isProposalReferenceStale(resolved.reference, currentRef)) {
       this.broadcast(io, roomId, resolved, false);
       return;
@@ -261,6 +348,18 @@ export class ProposalManager {
       return;
     }
 
+    if (resolved.type === "REMOVE_QUEUE_ITEM") {
+      // resolved.payload.type === "REMOVE_QUEUE_ITEM" is guaranteed here for
+      // the same reason as the SEEK narrowing above.
+      const queueItemId = resolved.payload.type === "REMOVE_QUEUE_ITEM" ? resolved.payload.queueItemId : "";
+      const result = removeQueueItem(db, roomId, queueItemId);
+      this.broadcast(io, roomId, resolved, result.removed);
+      if (result.removed) {
+        io.to(roomId).emit("queue:itemRemoved", { queueItemId });
+      }
+      return;
+    }
+
     const status = resolved.type === "PLAY" ? "PLAYING" : "PAUSED";
     const updated = setPlaybackStatus(db, roomId, status);
     this.broadcast(io, roomId, resolved, updated !== null);
@@ -269,7 +368,15 @@ export class ProposalManager {
     }
   }
 
-  private currentPlaybackReference(db: DatabaseSync, roomId: string): ProposalReference | null {
+  // Returns a *current* reference of the same kind as `reference` — playback
+  // for a playback-kind reference, queue for a queue-kind one — so the
+  // staleness comparison in resolveRoom always compares like with like (see
+  // the comment at that call site for why a kind mismatch would otherwise be
+  // fatal to every REMOVE_QUEUE_ITEM proposal).
+  private currentReferenceFor(db: DatabaseSync, roomId: string, reference: ProposalReference): ProposalReference | null {
+    if (reference.kind === "queue") {
+      return { kind: "queue", queueRevision: getQueueRevision(db, roomId) };
+    }
     const playback = getCurrentPlayback(db, roomId);
     if (!playback) return null;
     return { kind: "playback", playbackId: playback.playbackId, revision: playback.revision };
