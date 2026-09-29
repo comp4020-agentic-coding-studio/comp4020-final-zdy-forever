@@ -48,3 +48,18 @@ export interface CreateRoomRequest {
   visibility: RoomVisibility;
   autoCloseEnabled: boolean;
 }
+
+// The public lobby only ever lists PUBLIC, open rooms — never a PRIVATE
+// room, and never its code.
+export interface LobbyRoom {
+  roomId: string;
+  name: string;
+  occupancy: number;
+  capacity: number;
+  joinable: boolean;
+}
+
+export interface JoinRoomResult {
+  room: Room;
+  occupancy: number;
+}

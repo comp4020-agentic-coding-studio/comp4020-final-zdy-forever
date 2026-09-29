@@ -7,12 +7,22 @@ import type {
   Account,
   CreateRoomRequest,
   HealthResponse,
+  JoinRoomResult,
+  LobbyRoom,
   RegisterRequest,
   Room,
 } from "../../shared/src/types.ts";
 import { getAccountById, registerAccount } from "./accounts.ts";
 import { openDatabase } from "./db.ts";
-import { createRoom } from "./rooms.ts";
+import {
+  createRoom,
+  getActiveRoomByCode,
+  getRoomById,
+  joinRoom,
+  listPublicLobby,
+  RoomClosedError,
+  RoomFullError,
+} from "./rooms.ts";
 
 // Bundled (server/dist/index.js) and unbundled (server/src/index.ts) both
 // sit two levels below the repo root, so this resolves correctly either way.
@@ -74,6 +84,82 @@ app.post("/api/rooms", (req, res) => {
 
   const room: Room = createRoom(db, { accountId, name, visibility, autoCloseEnabled });
   res.status(201).json(room);
+});
+
+// The public lobby only ever lists PUBLIC, open rooms — a PRIVATE room (and
+// its code) never appears here.
+app.get("/api/lobby", (_req, res) => {
+  const rooms: LobbyRoom[] = listPublicLobby(db);
+  res.json(rooms);
+});
+
+function handleJoinError(res: express.Response, err: unknown): void {
+  if (err instanceof RoomClosedError || err instanceof RoomFullError) {
+    res.status(409).json({ error: err.message });
+    return;
+  }
+  throw err;
+}
+
+// Joins a PUBLIC room directly by id. A PRIVATE room is reported as
+// not-found here (not 403/409) so probing roomIds can't be used to learn
+// that a private room exists.
+app.post("/api/rooms/:roomId/join", (req, res) => {
+  const { roomId } = req.params;
+  const body = req.body as { accountId?: unknown };
+  const accountId = typeof body.accountId === "string" ? body.accountId.trim() : "";
+
+  if (!accountId) {
+    res.status(400).json({ error: "accountId is required" });
+    return;
+  }
+
+  const room = getRoomById(db, roomId);
+  if (!room || room.visibility !== "PUBLIC") {
+    res.status(404).json({ error: "room not found" });
+    return;
+  }
+  if (!getAccountById(db, accountId)) {
+    res.status(400).json({ error: "unknown accountId" });
+    return;
+  }
+
+  try {
+    const result: JoinRoomResult = joinRoom(db, roomId, accountId);
+    res.json(result);
+  } catch (err) {
+    handleJoinError(res, err);
+  }
+});
+
+// Joins a PRIVATE (or PUBLIC) room by its 6-digit code — the only way to
+// reach a PRIVATE room, since it never appears in the lobby.
+app.post("/api/rooms/join-by-code", (req, res) => {
+  const body = req.body as { accountId?: unknown; code?: unknown };
+  const accountId = typeof body.accountId === "string" ? body.accountId.trim() : "";
+  const code = typeof body.code === "string" ? body.code.trim() : "";
+
+  if (!accountId || !/^\d{6}$/.test(code)) {
+    res.status(400).json({ error: "accountId and a 6-digit code are required" });
+    return;
+  }
+  if (!getAccountById(db, accountId)) {
+    res.status(400).json({ error: "unknown accountId" });
+    return;
+  }
+
+  const room = getActiveRoomByCode(db, code);
+  if (!room) {
+    res.status(404).json({ error: "invalid code" });
+    return;
+  }
+
+  try {
+    const result: JoinRoomResult = joinRoom(db, room.roomId, accountId);
+    res.json(result);
+  } catch (err) {
+    handleJoinError(res, err);
+  }
 });
 
 // Renders README.md at /readme/, satisfying spec/invariants.test.ts (every

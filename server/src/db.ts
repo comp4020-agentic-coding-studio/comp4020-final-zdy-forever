@@ -46,5 +46,14 @@ export function openDatabase(dbPath: string): DatabaseSync {
       WHERE closed = 0 AND code IS NOT NULL
   `);
 
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS room_participants (
+      roomId    TEXT NOT NULL REFERENCES rooms(roomId),
+      accountId TEXT NOT NULL REFERENCES accounts(accountId),
+      joinedAt  TEXT NOT NULL,
+      PRIMARY KEY (roomId, accountId)
+    )
+  `);
+
   return db;
 }
