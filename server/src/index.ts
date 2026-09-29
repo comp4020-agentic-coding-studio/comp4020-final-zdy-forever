@@ -14,11 +14,13 @@ import type {
   QueueItem,
   RegisterRequest,
   Room,
+  RoomPlaybackSnapshot,
   YoutubeVideoMetadata,
 } from "../../shared/src/types.ts";
 import { parseYouTubeVideoId } from "../../shared/src/youtube.ts";
 import { getAccountById, registerAccount } from "./accounts.ts";
 import { openDatabase } from "./db.ts";
+import { ensureCurrentTrack, getCurrentPlayback, getNextTrack } from "./playback.ts";
 import { addTrack, InvalidTrackError, listQueue } from "./queue.ts";
 import { attachRealtime } from "./realtime.ts";
 import {
@@ -227,6 +229,9 @@ app.post("/api/rooms/:roomId/queue", async (req, res) => {
 
   try {
     const item: QueueItem = await addTrack(db, roomId, accountId, input);
+    // If nothing is currently playing in this room (e.g. this is the first
+    // track ever added, or the queue had drained), it starts playing now.
+    ensureCurrentTrack(db, roomId, item.queueItemId);
     io.to(roomId).emit("queue:itemAdded", item);
     res.status(201).json(item);
   } catch (err) {
@@ -236,6 +241,21 @@ app.post("/api/rooms/:roomId/queue", async (req, res) => {
     }
     handleYoutubeError(res, err);
   }
+});
+
+// The current track, current DJ, and next track — a plain display snapshot.
+// No voting or synchronized position/timing is implemented yet.
+app.get("/api/rooms/:roomId/playback", (req, res) => {
+  const { roomId } = req.params;
+  if (!getRoomById(db, roomId)) {
+    res.status(404).json({ error: "room not found" });
+    return;
+  }
+  const snapshot: RoomPlaybackSnapshot = {
+    current: getCurrentPlayback(db, roomId),
+    next: getNextTrack(db, roomId),
+  };
+  res.json(snapshot);
 });
 
 // Search is submit-driven only — the client calls this once per explicit

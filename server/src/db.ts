@@ -71,5 +71,22 @@ export function openDatabase(dbPath: string): DatabaseSync {
     )
   `);
 
+  // The currently-playing queue item, one row per room (no row = nothing
+  // currently playing). playbackId identifies this particular "now playing"
+  // instance — it changes on every track transition even if the same
+  // queueItemId were ever to play again — so it, not queueItemId or roomId,
+  // is what a future vote/skip proposal must reference to detect staleness.
+  // The DJ for the current track is never stored here: it's always looked up
+  // live as queue_items.addedBy for this row's queueItemId, so it belongs to
+  // the track (not permanently to the room) and can't drift out of sync.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS room_playback (
+      roomId      TEXT PRIMARY KEY REFERENCES rooms(roomId),
+      playbackId  TEXT NOT NULL,
+      queueItemId TEXT NOT NULL REFERENCES queue_items(queueItemId),
+      startedAt   TEXT NOT NULL
+    )
+  `);
+
   return db;
 }

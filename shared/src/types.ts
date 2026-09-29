@@ -125,3 +125,30 @@ export interface RoomSnapshot {
 export interface RoomJoinPayload {
   roomId: string;
 }
+
+// The currently-playing queue item. playbackId identifies this particular
+// "now playing" instance (distinct from queueItemId: it changes on every
+// track transition, so a future stale vote/skip proposal can be detected by
+// comparing playbackId, not by comparing queueItemId or a queue revision
+// alone). dj is always the account that originally added this queue item —
+// looked up live, never cached — so the DJ role belongs to the track, not
+// permanently to the room, and is unaffected by that account's connection
+// state.
+export interface PlaybackState {
+  playbackId: string;
+  queueItemId: string;
+  videoId: string;
+  title: string;
+  channelTitle: string;
+  thumbnailUrl: string;
+  startedAt: string;
+  dj: { accountId: string; displayName: string };
+}
+
+// Handed back by GET .../playback: what's playing now (or null if nothing
+// is), and what would play next. Both are purely a display concern at this
+// stage — no voting or synchronized position/timing is implemented yet.
+export interface RoomPlaybackSnapshot {
+  current: PlaybackState | null;
+  next: QueueItem | null;
+}

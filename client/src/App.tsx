@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type {
   Account,
   HealthResponse,
+  RoomPlaybackSnapshot,
   YoutubeSearchResult,
   YoutubeVideoMetadata,
 } from "../../shared/src/types.ts";
@@ -22,6 +23,9 @@ function App() {
   const [demoSongs, setDemoSongs] = useState<YoutubeSearchResult[] | "error" | null>(null);
   const [urlInput, setUrlInput] = useState("");
   const [resolveError, setResolveError] = useState<string | null>(null);
+
+  const [roomIdInput, setRoomIdInput] = useState("");
+  const [playback, setPlayback] = useState<RoomPlaybackSnapshot | "error" | null>(null);
 
   useEffect(() => {
     fetch("/api/health")
@@ -91,6 +95,22 @@ function App() {
     }
   };
 
+  // Submitted explicitly (there's no room-join flow in this client yet) —
+  // just enough plumbing to display a room's current-track/DJ/next-track
+  // state, which is all this phase asks for.
+  const loadPlayback = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const id = roomIdInput.trim();
+    if (!id) return;
+    try {
+      const res = await fetch(`/api/rooms/${encodeURIComponent(id)}/playback`);
+      if (!res.ok) throw new Error(await res.text());
+      setPlayback((await res.json()) as RoomPlaybackSnapshot);
+    } catch {
+      setPlayback("error");
+    }
+  };
+
   return (
     <main>
       <h1>Echo Room</h1>
@@ -143,6 +163,37 @@ function App() {
               </li>
             ))}
           </ul>
+        )}
+      </section>
+
+      <section>
+        <h2>Now playing</h2>
+        <form onSubmit={loadPlayback}>
+          <input value={roomIdInput} onChange={(e) => setRoomIdInput(e.target.value)} placeholder="roomId" />
+          <button type="submit">View room</button>
+        </form>
+        {playback === "error" && <p role="alert">could not load that room's playback</p>}
+        {playback && playback !== "error" && (
+          <>
+            {playback.current ? (
+              <div>
+                <p>
+                  Current track: {playback.current.title} — {playback.current.channelTitle}
+                </p>
+                <p>DJ: {playback.current.dj.displayName}</p>
+                <p>playbackId: {playback.current.playbackId}</p>
+              </div>
+            ) : (
+              <p>nothing is currently playing</p>
+            )}
+            {playback.next ? (
+              <p>
+                Next: {playback.next.title} — {playback.next.channelTitle}
+              </p>
+            ) : (
+              <p>queue has nothing lined up next</p>
+            )}
+          </>
         )}
       </section>
 
