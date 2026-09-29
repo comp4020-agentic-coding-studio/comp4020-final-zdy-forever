@@ -11,7 +11,9 @@ import type {
   LobbyRoom,
   RegisterRequest,
   Room,
+  YoutubeVideoMetadata,
 } from "../../shared/src/types.ts";
+import { parseYouTubeVideoId } from "../../shared/src/youtube.ts";
 import { getAccountById, registerAccount } from "./accounts.ts";
 import { openDatabase } from "./db.ts";
 import {
@@ -23,6 +25,13 @@ import {
   RoomClosedError,
   RoomFullError,
 } from "./rooms.ts";
+import {
+  getDemoSongs,
+  getVideoMetadata,
+  searchVideos,
+  YoutubeApiError,
+  YoutubeApiKeyMissingError,
+} from "./youtube.ts";
 
 // Bundled (server/dist/index.js) and unbundled (server/src/index.ts) both
 // sit two levels below the repo root, so this resolves correctly either way.
@@ -159,6 +168,65 @@ app.post("/api/rooms/join-by-code", (req, res) => {
     res.json(result);
   } catch (err) {
     handleJoinError(res, err);
+  }
+});
+
+function handleYoutubeError(res: express.Response, err: unknown): void {
+  if (err instanceof YoutubeApiKeyMissingError) {
+    res.status(503).json({ error: "YouTube API is not configured" });
+    return;
+  }
+  if (err instanceof YoutubeApiError) {
+    res.status(502).json({ error: err.message });
+    return;
+  }
+  throw err;
+}
+
+// Search is submit-driven only — the client calls this once per explicit
+// search, never per keystroke (see App.tsx's search form).
+app.get("/api/youtube/search", async (req, res) => {
+  const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  if (!q) {
+    res.status(400).json({ error: "q is required" });
+    return;
+  }
+  try {
+    res.json(await searchVideos(q));
+  } catch (err) {
+    handleYoutubeError(res, err);
+  }
+});
+
+app.get("/api/youtube/demo-songs", async (_req, res) => {
+  try {
+    res.json(await getDemoSongs());
+  } catch (err) {
+    handleYoutubeError(res, err);
+  }
+});
+
+// Accepts a pasted YouTube URL or a bare videoId, parses it, and looks up
+// its metadata (including whether it's actually embeddable) in one step.
+app.post("/api/youtube/resolve", async (req, res) => {
+  const body = req.body as { input?: unknown };
+  const input = typeof body.input === "string" ? body.input : "";
+  const videoId = input ? parseYouTubeVideoId(input) : null;
+
+  if (!videoId) {
+    res.status(400).json({ error: "not a recognizable YouTube video URL or videoId" });
+    return;
+  }
+
+  try {
+    const metadata: YoutubeVideoMetadata | null = await getVideoMetadata(videoId);
+    if (!metadata) {
+      res.status(404).json({ error: "video not found" });
+      return;
+    }
+    res.json(metadata);
+  } catch (err) {
+    handleYoutubeError(res, err);
   }
 });
 

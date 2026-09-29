@@ -63,3 +63,17 @@ export interface JoinRoomResult {
   room: Room;
   occupancy: number;
 }
+
+// Shape returned by both search and the demo-songs list.
+export interface YoutubeSearchResult {
+  videoId: string;
+  title: string;
+  channelTitle: string;
+  thumbnailUrl: string;
+}
+
+// The fuller record returned by a single-video metadata lookup, which also
+// carries whether the video can actually be embedded elsewhere.
+export interface YoutubeVideoMetadata extends YoutubeSearchResult {
+  embeddable: boolean;
+}
