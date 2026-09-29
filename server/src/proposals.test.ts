@@ -422,6 +422,55 @@ describe("ProposalManager", () => {
     expect(last.applied).toBe(false);
   });
 
+  it("a DB write failure while applying a passed SKIP never crashes resolution — it reports PASSED-but-not-applied, leaves playback untouched, and frees the room for a fresh proposal", async () => {
+    // Regression test: resolveRoom's real setTimeout callback used to have
+    // no error handling around applying a passed vote. A thrown error there
+    // (a full disk, a locked file, ...) would be an uncaught exception that
+    // crashes the entire process, not just this one room. This simulates
+    // that failure by making the SKIP branch's own persisting statement
+    // (advanceToNextTrack's INSERT INTO room_playback) throw.
+    const manager = new ProposalManager();
+    const { io, emitted } = fakeIo();
+    const before = getCurrentPlayback(db, roomId)!;
+
+    await addTrack(db, roomId, bob.accountId, SONG_ID, { resolveMetadata });
+
+    const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "SKIP", {
+      votingWindowMs: 20,
+    });
+    expect(requested.ok).toBe(true);
+    if (!requested.ok) return;
+    manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "YES");
+
+    const realPrepare = db.prepare.bind(db);
+    const spy = vi.spyOn(db, "prepare").mockImplementation((sql: string) => {
+      if (sql.includes("INSERT INTO room_playback")) {
+        throw new Error("simulated disk write failure");
+      }
+      return realPrepare(sql);
+    });
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await sleep(60);
+
+    spy.mockRestore();
+    consoleSpy.mockRestore();
+
+    // Playback is exactly as it was before the vote — no half-applied skip.
+    expect(getCurrentPlayback(db, roomId)).toEqual(before);
+
+    const resolutions = emitted.filter((e) => e.event === "proposal:update").map((e) => e.payload as ProposalBroadcast);
+    const last = resolutions[resolutions.length - 1];
+    expect(last.proposal.state).toBe("PASSED");
+    expect(last.applied).toBe(false);
+    expect(emitted.some((e) => e.event === "playback:update")).toBe(false);
+
+    // The room is not left stuck: a fresh proposal can be requested right away.
+    expect(manager.getActiveProposal(roomId)).toBeNull();
+    const retried = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "SKIP", { votingWindowMs: 20 });
+    expect(retried.ok).toBe(true);
+  });
+
   it("invalidates an open SKIP proposal immediately when its track naturally ends, and advances to the next item exactly once", async () => {
     const manager = new ProposalManager();
     const { io, emitted } = fakeIo();

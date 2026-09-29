@@ -247,6 +247,8 @@ Pay particular attention to:
 - reorder while queue changes
 - disconnect/reconnect during votes or track changes
 
+An unexpected error applying a passed vote or handling a request (e.g. a DB write failure) must degrade that one room/request gracefully, never crash the whole server.
+
 When a bug reveals a reusable invariant:
 
 1. fix it

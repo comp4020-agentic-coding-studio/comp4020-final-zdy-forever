@@ -21,6 +21,7 @@ import type {
 import { parseYouTubeVideoId } from "../../shared/src/youtube.ts";
 import { getAccountById, registerAccount } from "./accounts.ts";
 import { openDatabase } from "./db.ts";
+import { handleYoutubeError } from "./httpErrors.ts";
 import { ensureCurrentTrack, getCurrentPlayback, getNextTrack, recoverPlaybackOnStartup } from "./playback.ts";
 import { addTrack, InvalidTrackError, listQueue } from "./queue.ts";
 import { broadcastReactionHistory } from "./reactions.ts";
@@ -35,13 +36,7 @@ import {
   RoomClosedError,
   RoomFullError,
 } from "./rooms.ts";
-import {
-  getDemoSongs,
-  getVideoMetadata,
-  searchVideos,
-  YoutubeApiError,
-  YoutubeApiKeyMissingError,
-} from "./youtube.ts";
+import { getDemoSongs, getVideoMetadata, searchVideos } from "./youtube.ts";
 
 // Bundled (server/dist/index.js) and unbundled (server/src/index.ts) both
 // sit two levels below the repo root, so this resolves correctly either way.
@@ -189,18 +184,6 @@ app.post("/api/rooms/join-by-code", (req, res) => {
     handleJoinError(res, err);
   }
 });
-
-function handleYoutubeError(res: express.Response, err: unknown): void {
-  if (err instanceof YoutubeApiKeyMissingError) {
-    res.status(503).json({ error: "YouTube API is not configured" });
-    return;
-  }
-  if (err instanceof YoutubeApiError) {
-    res.status(502).json({ error: err.message });
-    return;
-  }
-  throw err;
-}
 
 // Lists a room's queue in stable insertion order. queueItemId, not array
 // position, is each item's identity.

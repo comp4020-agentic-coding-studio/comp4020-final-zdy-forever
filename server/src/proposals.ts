@@ -403,6 +403,22 @@ export class ProposalManager {
       return;
     }
 
+    // A passed vote's execution touches the DB and can throw (a write
+    // failure, a full disk, ...). This runs from a real setTimeout callback
+    // in production, so an uncaught throw here would be an uncaught
+    // exception that crashes the entire process — every room, not just this
+    // one. Treat any such failure the same as a vote that passed but whose
+    // reference went stale: report it honestly as PASSED-but-not-applied and
+    // let the room carry on.
+    try {
+      this.executePassedProposal(io, db, roomId, resolved);
+    } catch (err) {
+      console.error(`proposal ${resolved.proposalId} passed but failed to apply in room ${roomId}:`, err);
+      this.broadcast(io, roomId, resolved, false);
+    }
+  }
+
+  private executePassedProposal(io: Server, db: DatabaseSync, roomId: string, resolved: Proposal): void {
     // Never partially apply a passed vote against state it no longer
     // describes — something else (another anchor rebase, a track transition,
     // a concurrent removal) must have landed first. The current reference
