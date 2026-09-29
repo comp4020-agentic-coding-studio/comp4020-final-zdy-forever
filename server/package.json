@@ -11,12 +11,14 @@
   },
   "dependencies": {
     "express": "^5.2.1",
-    "marked": "^18.0.14"
+    "marked": "^18.0.14",
+    "socket.io": "^4.8.4"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
     "@types/node": "^24.13.6",
     "esbuild": "^0.28.2",
+    "socket.io-client": "^4.8.4",
     "tsx": "^4.23.15",
     "typescript": "^6.0.3"
   }

@@ -99,3 +99,29 @@ export interface AddTrackRequest {
   accountId: string;
   input: string;
 }
+
+// Presence is ephemeral (never persisted): identity here is always
+// accountId, deduplicated across that account's simultaneous sockets (e.g.
+// duplicate browser tabs), so one account only ever appears once regardless
+// of how many connections it holds. displayName is carried along purely for
+// display — never usable as identity, and may collide across accounts.
+export interface PresenceEntry {
+  accountId: string;
+  displayName: string;
+}
+
+// Handed to a socket right after it (re)joins a room — the authoritative
+// state at that moment: durable room config and queue, plus who's currently
+// present. A client's own locally-held state is never trusted over this.
+export interface RoomSnapshot {
+  room: Room;
+  queue: QueueItem[];
+  presence: PresenceEntry[];
+}
+
+// Client -> server socket payload for joining/rejoining a room. accountId
+// and clientId are established once at connection time (socket auth), never
+// resent per-event.
+export interface RoomJoinPayload {
+  roomId: string;
+}

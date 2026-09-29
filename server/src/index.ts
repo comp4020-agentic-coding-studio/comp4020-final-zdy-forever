@@ -1,8 +1,10 @@
 import express from "express";
 import { marked } from "marked";
 import { readFileSync } from "node:fs";
+import { createServer } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { Server } from "socket.io";
 import type {
   Account,
   CreateRoomRequest,
@@ -18,6 +20,7 @@ import { parseYouTubeVideoId } from "../../shared/src/youtube.ts";
 import { getAccountById, registerAccount } from "./accounts.ts";
 import { openDatabase } from "./db.ts";
 import { addTrack, InvalidTrackError, listQueue } from "./queue.ts";
+import { attachRealtime } from "./realtime.ts";
 import {
   createRoom,
   getActiveRoomByCode,
@@ -49,6 +52,10 @@ const db = openDatabase(databasePath);
 
 const app = express();
 app.use(express.json());
+
+const httpServer = createServer(app);
+const io = new Server(httpServer);
+attachRealtime(io, db);
 
 app.get("/api/health", (_req, res) => {
   const body: HealthResponse = { status: "ok", uptime: process.uptime() };
@@ -220,6 +227,7 @@ app.post("/api/rooms/:roomId/queue", async (req, res) => {
 
   try {
     const item: QueueItem = await addTrack(db, roomId, accountId, input);
+    io.to(roomId).emit("queue:itemAdded", item);
     res.status(201).json(item);
   } catch (err) {
     if (err instanceof InvalidTrackError) {
@@ -303,6 +311,6 @@ app.use((_req, res) => {
 });
 
 const PORT = Number(process.env.PORT) || 8080;
-app.listen(PORT, () => {
+httpServer.listen(PORT, () => {
   console.log(`Echo Room server listening on :${PORT}`);
 });
