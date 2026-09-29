@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import type { Account, HealthResponse, YoutubeSearchResult, YoutubeVideoMetadata } from "../../shared/src/types.ts";
+import {
+  REACTION_EMOJIS,
+  type Account,
+  type HealthResponse,
+  type YoutubeSearchResult,
+  type YoutubeVideoMetadata,
+} from "../../shared/src/types.ts";
 import { getClientId } from "./clientId.ts";
 import { usePlaybackSync } from "./usePlaybackSync.ts";
 import { YoutubePlayer, type YoutubePlayerHandle } from "./YoutubePlayer.tsx";
@@ -197,6 +203,29 @@ function App() {
                   status: {live.playback.status} · playbackId: {live.playback.playbackId} · revision:{" "}
                   {live.playback.revision}
                 </p>
+
+                <div className="reactions-bar">
+                  {REACTION_EMOJIS.map((emoji) => (
+                    <button
+                      key={emoji}
+                      type="button"
+                      className="reaction-button"
+                      onClick={() => live.sendReaction(emoji)}
+                    >
+                      {emoji}
+                    </button>
+                  ))}
+                </div>
+                {live.reactionError && <p role="alert">{live.reactionError}</p>}
+
+                <div className="reactions-feed" aria-live="polite">
+                  {live.liveReactions.map((r) => (
+                    <span key={r.key} className={`reaction-bubble reaction-bubble--${r.kind.toLowerCase()}`}>
+                      {r.reaction.reaction} {r.reaction.displayName}
+                      {r.kind === "ECHO" && <> · {new Date(r.reaction.createdAt).toLocaleDateString()}</>}
+                    </span>
+                  ))}
+                </div>
 
                 {live.activeProposal ? (
                   (() => {

@@ -123,6 +123,12 @@ export interface RoomSnapshot {
   presence: PresenceEntry[];
   activeProposal: Proposal | null;
   playback: PlaybackState | null;
+  // Every reaction ever recorded against the currently-playing video in this
+  // room (empty array if nothing is playing) — seeded here so a late joiner
+  // or reconnecting client can immediately start matching historical echoes
+  // against local playback position, same as reactions:history on a later
+  // track transition (see CLAUDE.md's Reactions section).
+  reactionHistory: Reaction[];
 }
 
 // Client -> server socket payload for joining/rejoining a room. accountId
@@ -174,6 +180,44 @@ export interface RoomPlaybackSnapshot {
   current: PlaybackState | null;
   next: QueueItem | null;
 }
+
+// The small fixed reaction set (CLAUDE.md's Reactions section) — deliberately
+// closed, never free-text (that would be text chat, which CLAUDE.md
+// explicitly forbids).
+export const REACTION_EMOJIS = ["❤️", "🔥", "😭", "✨"] as const;
+export type ReactionEmoji = (typeof REACTION_EMOJIS)[number];
+
+// A single stored reaction: the fact that `accountId` reacted with `reaction`
+// at `positionMs` into `videoId`, in `roomId`, at `createdAt`. Reactions never
+// require voting (CLAUDE.md's Voting section). positionMs is always the
+// server-computed expected position at the moment it was sent (see
+// shared/src/playbackSync.ts's computeExpectedPositionMs) — a client never
+// gets to claim its own position. playbackId is carried along for
+// reference/debugging only: matching for historical replay is deliberately
+// by (roomId, videoId) alone, never playbackId, since a video restarting
+// under a brand new playbackId is exactly the "same video plays again" case a
+// historical echo must still cover.
+export interface Reaction {
+  reactionId: string;
+  roomId: string;
+  videoId: string;
+  playbackId: string;
+  accountId: string;
+  displayName: string;
+  reaction: ReactionEmoji;
+  positionMs: number;
+  createdAt: string;
+}
+
+// Distinguishes a reaction's live broadcast from a later historical replay at
+// the wire level — this distinction is deliberately never stored in the
+// database row itself (see server/src/db.ts's reactions table): a stored
+// Reaction is always just "the fact of a live moment," and ECHO is purely a
+// redelivery/replay interpretation of that same fact when the same video
+// plays again, never a second persisted entity.
+export type ReactionEvent =
+  | { kind: "LIVE"; reaction: Reaction }
+  | { kind: "ECHO"; reaction: Reaction };
 
 // One account's reorder-token balance in one room (see CLAUDE.md's Reorder
 // section and shared/src/reorderTokens.ts). Always server-computed from a

@@ -165,5 +165,35 @@ export function openDatabase(dbPath: string): DatabaseSync {
     )
   `);
 
+  // One row per recorded reaction (CLAUDE.md's Reactions section). displayName
+  // is denormalized here (rather than looked up live from accounts, as the DJ
+  // is in room_playback) because a reaction is a historical record of what
+  // was shown at the time — it should read the same on replay even if the
+  // account later changes its display name. There is no "kind" (LIVE/ECHO)
+  // column: that distinction only ever exists at the wire level (see
+  // shared/src/types.ts's ReactionEvent) — a stored row is always just the
+  // fact of a live moment. Matching for historical replay is by (roomId,
+  // videoId) alone (see reactions_room_video below), deliberately never by
+  // playbackId, since a video restarting under a brand new playbackId is
+  // exactly the "same video plays again" case that must still surface prior
+  // reactions — playbackId is kept purely for reference/debugging.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS reactions (
+      reactionId  TEXT PRIMARY KEY,
+      roomId      TEXT NOT NULL REFERENCES rooms(roomId),
+      videoId     TEXT NOT NULL,
+      playbackId  TEXT NOT NULL,
+      accountId   TEXT NOT NULL REFERENCES accounts(accountId),
+      displayName TEXT NOT NULL,
+      reaction    TEXT NOT NULL CHECK (reaction IN ('❤️', '🔥', '😭', '✨')),
+      positionMs  INTEGER NOT NULL,
+      createdAt   TEXT NOT NULL
+    )
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS reactions_room_video ON reactions(roomId, videoId)
+  `);
+
   return db;
 }

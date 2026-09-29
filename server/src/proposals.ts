@@ -21,6 +21,7 @@ import {
   removeQueueItem,
   reorderQueueItem,
 } from "./queue.ts";
+import { broadcastReactionHistory } from "./reactions.ts";
 import { consumeReorderToken, getReorderTokenBalance } from "./reorderTokenStore.ts";
 
 // Wires the pure voting engine (shared/src/voting.ts) to real playback/queue
@@ -341,6 +342,7 @@ export class ProposalManager {
     this.invalidateActive(io, roomId);
     const next = advanceToNextTrack(db, roomId);
     io.to(roomId).emit("playback:update", next);
+    if (next) broadcastReactionHistory(io, db, roomId, next.videoId);
   }
 
   // Cancels the room's pending resolution timer and marks its open proposal
@@ -407,6 +409,7 @@ export class ProposalManager {
       const next = advanceToNextTrack(db, roomId);
       this.broadcast(io, roomId, resolved, true);
       io.to(roomId).emit("playback:update", next);
+      if (next) broadcastReactionHistory(io, db, roomId, next.videoId);
       return;
     }
 

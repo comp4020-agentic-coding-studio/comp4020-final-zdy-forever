@@ -5,6 +5,9 @@ import type {
   PlaybackState,
   PresenceEntry,
   QueueItem,
+  Reaction,
+  ReactionEmoji,
+  ReactionEvent,
   ReorderTokenBalance,
   Room,
   RoomSnapshot,
@@ -25,6 +28,33 @@ const DRIFT_POLL_INTERVAL_MS = 2000;
 // player that's still catching up to its own seek/load.
 const POST_PLAYING_GRACE_MS = 1500;
 
+// How often the local player position is checked against reactionHistory
+// looking for a not-yet-fired historical reaction to echo — purely local,
+// never a network call, mirroring the drift-poll above (CLAUDE.md's
+// Reactions section: echoes are a client-side replay concern, not something
+// the server schedules).
+const ECHO_POLL_INTERVAL_MS = 1000;
+
+// How close local playback position must come to a stored reaction's
+// original positionMs before that reaction is echoed — wide enough to
+// tolerate the 1-second poll cadence and ordinary drift, narrow enough that
+// an echo still reads as "near its original timestamp."
+const ECHO_MATCH_WINDOW_MS = 1500;
+
+// How long a single displayed reaction (live or echo) stays in the feed
+// before it's removed.
+const REACTION_DISPLAY_MS = 4000;
+
+// A reaction currently shown in the transient feed — kind distinguishes a
+// live broadcast from a historical replay at render time (CLAUDE.md's
+// Reactions section: "keep live reactions and historical echoes
+// distinguishable"), never encoded on the Reaction record itself.
+export interface DisplayedReaction {
+  key: string;
+  kind: "LIVE" | "ECHO";
+  reaction: Reaction;
+}
+
 export interface RoomLiveState {
   connected: boolean;
   joinError: string | null;
@@ -44,6 +74,14 @@ export interface RoomLiveState {
   // or decremented locally; reorderTokens:update is the only thing that ever
   // changes it after the initial fetch.
   reorderTokenBalance: ReorderTokenBalance | null;
+  // Every reaction ever recorded against the currently-playing video —
+  // seeded from room:snapshot/reactions:history, and what the echo-scanning
+  // poll below matches local playback position against.
+  reactionHistory: Reaction[];
+  // Transient feed of reactions currently on screen (both LIVE broadcasts
+  // and ECHO sightings) — never persisted, purely a display concern.
+  liveReactions: DisplayedReaction[];
+  reactionError: string | null;
 }
 
 const EMPTY_STATE: RoomLiveState = {
@@ -56,6 +94,9 @@ const EMPTY_STATE: RoomLiveState = {
   activeProposal: null,
   proposalError: null,
   reorderTokenBalance: null,
+  reactionHistory: [],
+  liveReactions: [],
+  reactionError: null,
 };
 
 // Establishes the client's socket connection, joins (and rejoins on every
@@ -75,6 +116,23 @@ export function usePlaybackSync(
   const playingSinceRef = useRef<number | null>(null);
   const wasPlayingRef = useRef(false);
   const socketRef = useRef<Socket | null>(null);
+  const reactionHistoryRef = useRef<Reaction[]>([]);
+  // reactionIds already echoed for the currently-loaded video — cleared
+  // whenever reactionHistory is replaced wholesale (a genuine track
+  // transition), so the same historical reaction can echo again the next
+  // time its video plays.
+  const firedEchoIdsRef = useRef<Set<string>>(new Set());
+
+  // Shows a reaction in the transient feed for REACTION_DISPLAY_MS, then
+  // removes it — shared by the live broadcast handler and the echo-scanning
+  // poll below.
+  const pushDisplayedReaction = useCallback((kind: "LIVE" | "ECHO", reaction: Reaction) => {
+    const key = `${kind}:${reaction.reactionId}:${Date.now()}:${Math.random()}`;
+    setState((s) => ({ ...s, liveReactions: [...s.liveReactions, { key, kind, reaction }] }));
+    setTimeout(() => {
+      setState((s) => ({ ...s, liveReactions: s.liveReactions.filter((r) => r.key !== key) }));
+    }, REACTION_DISPLAY_MS);
+  }, []);
 
   // Applies a freshly-received anchor to the local player exactly once —
   // this, not a continuous stream, is the entire mechanism for late-join and
@@ -119,6 +177,8 @@ export function usePlaybackSync(
     });
 
     socket.on("room:snapshot", (snapshot: RoomSnapshot) => {
+      reactionHistoryRef.current = snapshot.reactionHistory;
+      firedEchoIdsRef.current = new Set();
       setState((s) => ({
         connected: true,
         joinError: null,
@@ -129,6 +189,9 @@ export function usePlaybackSync(
         activeProposal: snapshot.activeProposal,
         proposalError: null,
         reorderTokenBalance: s.reorderTokenBalance,
+        reactionHistory: snapshot.reactionHistory,
+        liveReactions: [],
+        reactionError: null,
       }));
       applyAnchor(snapshot.playback);
 
@@ -207,13 +270,45 @@ export function usePlaybackSync(
       setState((s) => ({ ...s, reorderTokenBalance: balance }));
     });
 
+    // The full historical reaction list for whatever video just became
+    // current — sent only at a genuine track transition (see
+    // server/src/reactions.ts's broadcastReactionHistory), never on every
+    // PLAY/PAUSE/SEEK update. Replaces reactionHistory wholesale and clears
+    // which echoes have already fired, since this is a fresh video.
+    socket.on("reactions:history", ({ reactions }: { videoId: string; reactions: Reaction[] }) => {
+      reactionHistoryRef.current = reactions;
+      firedEchoIdsRef.current = new Set();
+      setState((s) => ({ ...s, reactionHistory: reactions }));
+    });
+
+    // A reaction just sent by someone in the room, right now — always
+    // { kind: "LIVE" } over the wire (CLAUDE.md's Reactions section: live
+    // reactions broadcast immediately). It also belongs in reactionHistory
+    // so a client already in the room echoes it correctly on a later replay
+    // without waiting for the next reactions:history.
+    socket.on("reaction:new", (event: ReactionEvent) => {
+      reactionHistoryRef.current = [...reactionHistoryRef.current, event.reaction];
+      // Mark it as already-fired immediately — it was just shown live, so
+      // the echo-scanning poll must not also fire it as an ECHO of itself
+      // moments later while this same playthrough is still going.
+      firedEchoIdsRef.current.add(event.reaction.reactionId);
+      setState((s) => ({ ...s, reactionHistory: [...s.reactionHistory, event.reaction] }));
+      pushDisplayedReaction(event.kind, event.reaction);
+    });
+
+    socket.on("reaction:sendError", ({ error }: { error: string }) => {
+      setState((s) => ({ ...s, reactionError: error }));
+    });
+
     return () => {
       socket.disconnect();
       socketRef.current = null;
       playbackRef.current = null;
+      reactionHistoryRef.current = [];
+      firedEchoIdsRef.current = new Set();
       setState(EMPTY_STATE);
     };
-  }, [roomId, accountId, clientId]);
+  }, [roomId, accountId, clientId, pushDisplayedReaction]);
 
   // Requests a PLAY/PAUSE/SKIP proposal — never mutates local playback state
   // itself; the server's proposal:update/playback:update events are the only
@@ -257,6 +352,13 @@ export function usePlaybackSync(
 
   const castProposalVote = useCallback((proposalId: string, choice: VoteChoice) => {
     socketRef.current?.emit("proposal:vote", { proposalId, choice });
+  }, []);
+
+  // Sends a reaction — never requires voting (CLAUDE.md's Reactions/Voting
+  // sections). The server computes positionMs authoritatively; this call
+  // carries only the chosen emoji.
+  const sendReaction = useCallback((reaction: ReactionEmoji) => {
+    socketRef.current?.emit("reaction:send", { reaction });
   }, []);
 
   // Wired to <YoutubePlayer onStateChange>. Only ENDED matters here, and
@@ -311,6 +413,31 @@ export function usePlaybackSync(
     return () => clearInterval(interval);
   }, [playerRef]);
 
+  // The historical-echo loop: purely local, checks the player's own current
+  // position against reactionHistory looking for a not-yet-fired reaction
+  // whose original positionMs is now nearby (CLAUDE.md's Reactions section:
+  // "stored reactions can reappear near the original timestamp"). Only
+  // scans while genuinely PLAYING, mirroring the drift-poll's own guard.
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const player = playerRef.current;
+      const playback = playbackRef.current;
+      if (!player || !playback || playback.status !== "PLAYING") return;
+      if (player.getPlayerState() !== YT_PLAYER_STATE.PLAYING) return;
+
+      const expectedMs = computeExpectedPositionMs(playback, Date.now());
+      for (const reaction of reactionHistoryRef.current) {
+        if (firedEchoIdsRef.current.has(reaction.reactionId)) continue;
+        if (Math.abs(reaction.positionMs - expectedMs) <= ECHO_MATCH_WINDOW_MS) {
+          firedEchoIdsRef.current.add(reaction.reactionId);
+          pushDisplayedReaction("ECHO", reaction);
+        }
+      }
+    }, ECHO_POLL_INTERVAL_MS);
+
+    return () => clearInterval(interval);
+  }, [playerRef, pushDisplayedReaction]);
+
   return {
     ...state,
     requestPlaybackProposal,
@@ -319,5 +446,6 @@ export function usePlaybackSync(
     requestReorderQueueProposal,
     castProposalVote,
     handlePlayerStateChange,
+    sendReaction,
   };
 }

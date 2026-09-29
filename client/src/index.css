@@ -6,3 +6,57 @@
 body {
   margin: 0;
 }
+
+.reactions-bar {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.reaction-button {
+  font-size: 1.5rem;
+  line-height: 1;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+
+.reactions-feed {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  min-height: 1.5rem;
+}
+
+.reaction-bubble {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, canvastext 8%, canvas);
+  animation: reaction-pop 0.25s ease-out;
+}
+
+.reaction-bubble--echo {
+  opacity: 0.75;
+  font-style: italic;
+}
+
+@keyframes reaction-pop {
+  from {
+    transform: scale(0.6);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* CLAUDE.md: respect prefers-reduced-motion — no pop/scale animation, just
+   a plain fade for anyone who has asked for reduced motion. */
+@media (prefers-reduced-motion: reduce) {
+  .reaction-bubble {
+    animation: none;
+  }
+}

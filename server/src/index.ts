@@ -23,6 +23,7 @@ import { getAccountById, registerAccount } from "./accounts.ts";
 import { openDatabase } from "./db.ts";
 import { ensureCurrentTrack, getCurrentPlayback, getNextTrack, recoverPlaybackOnStartup } from "./playback.ts";
 import { addTrack, InvalidTrackError, listQueue } from "./queue.ts";
+import { broadcastReactionHistory } from "./reactions.ts";
 import { attachRealtime } from "./realtime.ts";
 import { getReorderTokenBalance } from "./reorderTokenStore.ts";
 import {
@@ -245,6 +246,7 @@ app.post("/api/rooms/:roomId/queue", async (req, res) => {
     io.to(roomId).emit("queue:itemAdded", item);
     if (started) {
       io.to(roomId).emit("playback:update", started);
+      broadcastReactionHistory(io, db, roomId, started.videoId);
     }
     res.status(201).json(item);
   } catch (err) {

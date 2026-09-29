@@ -1,12 +1,15 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { Server, Socket } from "socket.io";
-import type { RoomJoinPayload, RoomSnapshot } from "../../shared/src/types.ts";
+import type { ReactionEvent, RoomJoinPayload, RoomSnapshot } from "../../shared/src/types.ts";
+import { computeExpectedPositionMs, toAnchor } from "../../shared/src/playbackSync.ts";
 import type { VoteChoice } from "../../shared/src/voting.ts";
 import { getAccountByClientId } from "./accounts.ts";
 import { getCurrentPlayback } from "./playback.ts";
 import { PresenceStore } from "./presence.ts";
 import { ProposalManager } from "./proposals.ts";
 import { listQueue } from "./queue.ts";
+import { isReactionEmoji, listReactionsForVideo, recordReaction } from "./reactions.ts";
+import { ReactionRateLimiter } from "./reactionRateLimiter.ts";
 import { joinRoom, RoomClosedError, RoomFullError, RoomNotFoundError } from "./rooms.ts";
 
 interface SocketData {
@@ -38,6 +41,7 @@ export interface RealtimeHandles {
 export function attachRealtime(io: Server, db: DatabaseSync, options: AttachRealtimeOptions = {}): RealtimeHandles {
   const presence = new PresenceStore();
   const proposals = new ProposalManager();
+  const reactionLimiter = new ReactionRateLimiter();
 
   io.use((socket, next) => {
     const auth = socket.handshake.auth as { accountId?: unknown; clientId?: unknown };
@@ -109,12 +113,14 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
         displayName: data.displayName,
       });
 
+      const playback = getCurrentPlayback(db, roomId);
       const snapshot: RoomSnapshot = {
         room,
         queue: listQueue(db, roomId),
         presence: presence.list(roomId),
         activeProposal: proposals.getActiveProposal(roomId),
-        playback: getCurrentPlayback(db, roomId),
+        playback,
+        reactionHistory: playback ? listReactionsForVideo(db, roomId, playback.videoId) : [],
       };
       socket.emit("room:snapshot", snapshot);
 
@@ -202,6 +208,45 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
       const playbackId = typeof payload?.playbackId === "string" ? payload.playbackId : "";
       if (!playbackId) return;
       proposals.handleTrackEnded(io, db, data.roomId, playbackId);
+    });
+
+    // Reactions never require voting (CLAUDE.md's Reactions/Voting
+    // sections) — the only gates are room membership, a valid emoji from
+    // the fixed set, an actually-playing track, and the rate limiter.
+    // positionMs is always server-computed here, never a client-claimed
+    // value (CLAUDE.md's Authority section).
+    socket.on("reaction:send", (payload: { reaction?: unknown }) => {
+      if (!data.roomId) {
+        socket.emit("reaction:sendError", { error: "join a room before reacting" });
+        return;
+      }
+      if (!isReactionEmoji(payload?.reaction)) {
+        socket.emit("reaction:sendError", { error: "unsupported reaction" });
+        return;
+      }
+      const playback = getCurrentPlayback(db, data.roomId);
+      if (!playback) {
+        socket.emit("reaction:sendError", { error: "nothing is currently playing" });
+        return;
+      }
+      const nowMs = Date.now();
+      if (!reactionLimiter.tryConsume(data.roomId, data.accountId, nowMs)) {
+        socket.emit("reaction:sendError", { error: "slow down — too many reactions" });
+        return;
+      }
+      const positionMs = computeExpectedPositionMs(toAnchor(playback), nowMs);
+      const reaction = recordReaction(db, {
+        roomId: data.roomId,
+        videoId: playback.videoId,
+        playbackId: playback.playbackId,
+        accountId: data.accountId,
+        displayName: data.displayName,
+        reaction: payload.reaction,
+        positionMs,
+        nowMs,
+      });
+      const event: ReactionEvent = { kind: "LIVE", reaction };
+      io.to(data.roomId).emit("reaction:new", event);
     });
 
     socket.on("disconnect", () => {
