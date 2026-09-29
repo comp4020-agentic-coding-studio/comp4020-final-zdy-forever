@@ -191,22 +191,25 @@ export const YoutubePlayer = forwardRef<YoutubePlayerHandle, YoutubePlayerProps>
       <div ref={containerRef} />
       {!videoId && <p>No track is playing.</p>}
       {error && <p role="alert">{error}</p>}
-      {needsManualPlay && !error && (
-        <button type="button" onClick={() => playerRef.current?.playVideo()}>
-          ▶ Play
-        </button>
-      )}
-      {videoId && isMuted && !error && (
-        <button
-          type="button"
-          onClick={() => {
-            playerRef.current?.unMute();
-            setIsMuted(false);
-          }}
-        >
-          🔇 Tap to unmute
-        </button>
-      )}
+      <div className="player-fallback-row">
+        {needsManualPlay && !error && (
+          <button type="button" className="btn btn--yellow" onClick={() => playerRef.current?.playVideo()}>
+            ▶ Play
+          </button>
+        )}
+        {videoId && isMuted && !error && (
+          <button
+            type="button"
+            className="btn btn--yellow"
+            onClick={() => {
+              playerRef.current?.unMute();
+              setIsMuted(false);
+            }}
+          >
+            🔇 Tap to unmute
+          </button>
+        )}
+      </div>
     </div>
   );
 });
