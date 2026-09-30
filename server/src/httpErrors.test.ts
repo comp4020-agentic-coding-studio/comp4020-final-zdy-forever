@@ -1,7 +1,7 @@
 import type { Response } from "express";
 import { describe, expect, it, vi } from "vitest";
 import { handleYoutubeError } from "./httpErrors.ts";
-import { YoutubeApiError, YoutubeApiKeyMissingError } from "./youtube.ts";
+import { YoutubeLookupError } from "./youtube.ts";
 
 // A minimal express.Response stand-in: handleYoutubeError only ever calls
 // res.status(code).json(body), so a fake this thin is enough to capture the
@@ -22,17 +22,11 @@ function fakeResponse() {
 }
 
 describe("handleYoutubeError", () => {
-  it("maps a missing API key to 503", () => {
+  it("maps a YoutubeLookupError to 502 with its message", () => {
     const { res, calls } = fakeResponse();
-    handleYoutubeError(res, new YoutubeApiKeyMissingError("no key configured"));
-    expect(calls.status).toBe(503);
-  });
-
-  it("maps a YoutubeApiError to 502 with its message", () => {
-    const { res, calls } = fakeResponse();
-    handleYoutubeError(res, new YoutubeApiError("quota exceeded"));
+    handleYoutubeError(res, new YoutubeLookupError("couldn't reach YouTube"));
     expect(calls.status).toBe(502);
-    expect(calls.body).toEqual({ error: "quota exceeded" });
+    expect(calls.body).toEqual({ error: "couldn't reach YouTube" });
   });
 
   // Regression test: this used to rethrow any error it didn't recognize.

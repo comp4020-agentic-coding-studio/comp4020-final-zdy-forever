@@ -62,6 +62,39 @@ describe("PresenceStore", () => {
     expect(store.leave("no-such-room", "no-such-socket")).toBeUndefined();
   });
 
+  it("counts distinct accounts, not sockets, toward capacity", () => {
+    const store = new PresenceStore();
+    store.join("room-1", "socket-tab-1", { accountId: "acct-alice", displayName: "Alice" });
+    store.join("room-1", "socket-tab-2", { accountId: "acct-alice", displayName: "Alice" });
+    store.join("room-1", "socket-bob", { accountId: "acct-bob", displayName: "Bob" });
+
+    expect(store.count("room-1")).toBe(2);
+    expect(store.count("no-such-room")).toBe(0);
+  });
+
+  it("admits a new account only while the room is below capacity, but always admits one already present", () => {
+    const store = new PresenceStore();
+    store.join("room-1", "socket-alice", { accountId: "acct-alice", displayName: "Alice" });
+    store.join("room-1", "socket-bob", { accountId: "acct-bob", displayName: "Bob" });
+
+    expect(store.canAdmit("room-1", "acct-carol", 2)).toBe(false);
+    expect(store.canAdmit("room-1", "acct-alice", 2)).toBe(true);
+    expect(store.canAdmit("room-1", "acct-carol", 3)).toBe(true);
+  });
+
+  // Regression: capacity used to count every account that had ever joined,
+  // so a room stayed "full" forever once it had seen `capacity` visitors.
+  it("frees a place as soon as an account's last socket leaves", () => {
+    const store = new PresenceStore();
+    store.join("room-1", "socket-alice", { accountId: "acct-alice", displayName: "Alice" });
+    store.join("room-1", "socket-bob", { accountId: "acct-bob", displayName: "Bob" });
+    expect(store.canAdmit("room-1", "acct-carol", 2)).toBe(false);
+
+    store.leave("room-1", "socket-bob");
+    expect(store.count("room-1")).toBe(1);
+    expect(store.canAdmit("room-1", "acct-carol", 2)).toBe(true);
+  });
+
   it("keeps rooms independent of one another", () => {
     const store = new PresenceStore();
     store.join("room-1", "socket-alice", { accountId: "acct-alice", displayName: "Alice" });

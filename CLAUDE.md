@@ -18,7 +18,7 @@ Use:
 - Node.js + Express
 - Socket.IO
 - SQLite
-- YouTube Data API v3
+- YouTube oEmbed (video metadata, no API key)
 - YouTube IFrame Player API
 
 Prefer one deployable Node application.
@@ -29,9 +29,11 @@ Keep shared client/server types in one place where practical.
 
 Use official YouTube APIs only.
 
+The YouTube Data API v3 is not available for this course: no API key, and so no search (see `docs/adr/0003-youtube-metadata-via-oembed.md`).
+
 Allowed:
 
-- search and metadata through Data API v3
+- video metadata (existence, embeddability, title, channel, thumbnail) through YouTube's public oEmbed endpoint
 - visible IFrame Player
 - play, pause, seek, player state and current time
 
@@ -57,6 +59,8 @@ Keep these separate:
 - `socketId`: temporary connection
 
 Never use displayName or socketId as permanent identity.
+
+`accountId` is public (rooms broadcast it). Never accept it alone as proof of who is calling: verify it against the caller's `clientId`, on sockets and REST alike.
 
 ## Rooms
 
@@ -112,6 +116,8 @@ Queue items use stable IDs.
 
 Concurrent additions must never overwrite each other.
 
+The queue holds only the current track and what's still to come: a track leaves it once it finishes (plays to its end or is skipped).
+
 The DJ for the current track is the account that added that queue item.
 
 DJ is a logical role; the DJ browser is never authoritative.
@@ -142,6 +148,8 @@ Voting rules:
 - minimum 2 non-abstain votes
 - required YES = floor(validVotes / 2) + 1
 - tie fails
+
+Exception: when the proposer is the only person in the room, there is nobody to vote with, so their proposal passes immediately (all other rules, e.g. DJ-only Seek and reorder tokens, still apply). See `docs/adr/0004-sole-listener-proposals-pass.md`.
 
 One account gets one vote.
 
@@ -247,7 +255,7 @@ Pay particular attention to:
 - reorder while queue changes
 - disconnect/reconnect during votes or track changes
 
-An unexpected error applying a passed vote or handling a request (e.g. a DB write failure) must degrade that one room/request gracefully, never crash the whole server.
+An unexpected error applying a passed vote or handling a request (e.g. a DB write failure) must degrade that one room/request gracefully, never crash the whole server. This includes Socket.IO event handlers: they run from `process.nextTick`, so a throw there is an uncaught exception. Wrap every handler (see `guarded` in `server/src/realtime.ts`).
 
 When a bug reveals a reusable invariant:
 

@@ -12,11 +12,13 @@ import {
   ensureCurrentTrack,
   getCurrentPlayback,
   getNextTrack,
+  recordServerAlive,
   recoverPlaybackOnStartup,
+  removeFinishedTracksOnStartup,
   setPlaybackStatus,
 } from "./playback.ts";
 import { PresenceStore } from "./presence.ts";
-import { addTrack } from "./queue.ts";
+import { addTrack, getQueueRevision, listQueue } from "./queue.ts";
 import { createRoom } from "./rooms.ts";
 
 describe("playback state and DJ role", () => {
@@ -119,6 +121,47 @@ describe("playback state and DJ role", () => {
     const resumed = await addAndMaybeStart(bob.accountId, SONG_B_ID);
     expect(getCurrentPlayback(db, roomId)?.queueItemId).toBe(resumed.queueItemId);
     expect(getCurrentPlayback(db, roomId)?.dj.accountId).toBe(bob.accountId);
+  });
+
+  // The queue only holds what's playing and what's still to come: a track
+  // that has finished (or been skipped) leaves it as the room moves on.
+  it("removes the finished track from the queue when advancing, and moves queueRevision on", async () => {
+    const first = await addAndMaybeStart(alice.accountId, SONG_A_ID);
+    const second = await addAndMaybeStart(bob.accountId, SONG_B_ID);
+    const revisionBefore = getQueueRevision(db, roomId);
+
+    advanceToNextTrack(db, roomId);
+
+    expect(listQueue(db, roomId).map((q) => q.queueItemId)).toEqual([second.queueItemId]);
+    expect(getQueueRevision(db, roomId)).toBe(revisionBefore + 1);
+    expect(listQueue(db, roomId).some((q) => q.queueItemId === first.queueItemId)).toBe(false);
+  });
+
+  it("leaves an empty queue once the last track finishes", async () => {
+    await addAndMaybeStart(alice.accountId, SONG_A_ID);
+
+    advanceToNextTrack(db, roomId);
+
+    expect(getCurrentPlayback(db, roomId)).toBeNull();
+    expect(listQueue(db, roomId)).toEqual([]);
+  });
+
+  it("clears out tracks that finished before finished tracks left the queue, once, at startup", async () => {
+    // As an older database left it: a's row kept after it finished.
+    const a = await addAndMaybeStart(alice.accountId, SONG_A_ID);
+    const b = await addAndMaybeStart(alice.accountId, SONG_B_ID);
+    const c = await addAndMaybeStart(alice.accountId, SONG_A_ID);
+    db.prepare("UPDATE room_playback SET queueItemId = ? WHERE roomId = ?").run(b.queueItemId, roomId);
+    // ...and a room that had drained, with nothing playing and its old rows left behind.
+    const drained = createRoom(db, { accountId: bob.accountId, name: "Drained", visibility: "PUBLIC", autoCloseEnabled: false }).roomId;
+    await addTrack(db, drained, bob.accountId, SONG_B_ID, { resolveMetadata });
+
+    removeFinishedTracksOnStartup(db);
+    removeFinishedTracksOnStartup(db); // idempotent
+
+    expect(listQueue(db, roomId).map((q) => q.queueItemId)).toEqual([b.queueItemId, c.queueItemId]);
+    expect(listQueue(db, drained)).toEqual([]);
+    expect(a.queueItemId).not.toBe(b.queueItemId);
   });
 
   it("advancing when nothing is playing is a no-op", () => {
@@ -289,6 +332,34 @@ describe("playback state and DJ role", () => {
 
     it("does nothing when no room has ever played anything", () => {
       expect(() => recoverPlaybackOnStartup(db)).not.toThrow();
+    });
+
+    // Regression: only the anchor was kept, and a track's anchor only moves
+    // on a play/pause/seek — so every restart sent an untouched track back
+    // to 0:00, however far into it the room had got.
+    it("recovers a PLAYING track where it had got to by the server's last sign of life, not at its anchor", async () => {
+      await addAndMaybeStart(alice.accountId, SONG_A_ID);
+      const playing = getCurrentPlayback(db, roomId)!;
+      recordServerAlive(db, playing.anchorServerTimeMs + 90_000); // last alive 90s into the track
+
+      const restartedAt = playing.anchorServerTimeMs + 600_000; // down for a while after that
+      recoverPlaybackOnStartup(db, restartedAt);
+
+      const recovered = getCurrentPlayback(db, roomId)!;
+      expect(recovered.status).toBe("PAUSED");
+      // 90s in: never extrapolated through the downtime after the last sign of life.
+      expect(recovered.anchorPositionMs).toBe(playing.anchorPositionMs + 90_000);
+      expect(recovered.anchorServerTimeMs).toBe(restartedAt);
+    });
+
+    it("never moves a track backwards when the last sign of life predates its anchor", async () => {
+      await addAndMaybeStart(alice.accountId, SONG_A_ID);
+      const playing = getCurrentPlayback(db, roomId)!;
+      recordServerAlive(db, playing.anchorServerTimeMs - 3_000);
+
+      recoverPlaybackOnStartup(db, playing.anchorServerTimeMs + 60_000);
+
+      expect(getCurrentPlayback(db, roomId)!.anchorPositionMs).toBe(playing.anchorPositionMs);
     });
   });
 });

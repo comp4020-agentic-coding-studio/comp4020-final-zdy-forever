@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { isValidVideoId, parseYouTubeVideoId } from "../../shared/src/youtube.ts";
-import { isEmbeddable } from "./youtube.ts";
+import { getVideoMetadata, YoutubeLookupError } from "./youtube.ts";
 
 describe("isValidVideoId", () => {
   it("accepts an 11-character videoId with letters, digits, - and _", () => {
@@ -55,21 +55,62 @@ describe("parseYouTubeVideoId", () => {
   });
 });
 
-describe("isEmbeddable", () => {
-  it("is true only when the owner allows embedding and the video isn't private", () => {
-    expect(isEmbeddable({ embeddable: true, privacyStatus: "public" })).toBe(true);
-    expect(isEmbeddable({ embeddable: true, privacyStatus: "unlisted" })).toBe(true);
+// YouTube's oEmbed endpoint, as it answers for real: 200 with the video's
+// details, 400 for an id that never existed, 404 for one that's gone, and
+// 401/403 for one that exists but can't be embedded (owner disabled it, or
+// it's private).
+describe("getVideoMetadata (oEmbed)", () => {
+  function answer(status: number, body: unknown = {}) {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(body), { status }));
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
-  it("is false when embedding is disallowed, even if not private", () => {
-    expect(isEmbeddable({ embeddable: false, privacyStatus: "public" })).toBe(false);
+  it("asks the public oEmbed endpoint, with no API key, and maps its answer", async () => {
+    const fetchMock = answer(200, {
+      title: "Never Gonna Give You Up",
+      author_name: "Rick Astley",
+      thumbnail_url: "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
+    });
+
+    const metadata = await getVideoMetadata("dQw4w9WgXcQ");
+
+    const requested = new URL(String((fetchMock.mock.calls[0] as unknown[])[0]));
+    expect(requested.origin + requested.pathname).toBe("https://www.youtube.com/oembed");
+    expect(requested.searchParams.get("url")).toBe("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+    expect(requested.searchParams.has("key")).toBe(false);
+    expect(metadata).toEqual({
+      videoId: "dQw4w9WgXcQ",
+      title: "Never Gonna Give You Up",
+      channelTitle: "Rick Astley",
+      thumbnailUrl: "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
+      embeddable: true,
+      durationMs: null,
+    });
   });
 
-  it("is false when the video is private, even if embeddable is reported true", () => {
-    expect(isEmbeddable({ embeddable: true, privacyStatus: "private" })).toBe(false);
+  it("reports a video that doesn't exist as not found", async () => {
+    answer(400);
+    expect(await getVideoMetadata("aaaaaaaaaaa")).toBeNull();
+    answer(404);
+    expect(await getVideoMetadata("aaaaaaaaaaa")).toBeNull();
   });
 
-  it("defaults to false when status fields are missing", () => {
-    expect(isEmbeddable({})).toBe(false);
+  it("reports a video that can't be embedded as not embeddable", async () => {
+    for (const status of [401, 403]) {
+      answer(status);
+      expect(await getVideoMetadata("dQw4w9WgXcQ")).toMatchObject({ videoId: "dQw4w9WgXcQ", embeddable: false });
+    }
+  });
+
+  it("treats YouTube being unreachable or failing as a lookup error, not as a verdict on the video", async () => {
+    answer(500);
+    await expect(getVideoMetadata("dQw4w9WgXcQ")).rejects.toBeInstanceOf(YoutubeLookupError);
+    vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(new TypeError("fetch failed"))));
+    await expect(getVideoMetadata("dQw4w9WgXcQ")).rejects.toBeInstanceOf(YoutubeLookupError);
   });
 });

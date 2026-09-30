@@ -1,13 +1,14 @@
 import { randomInt, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import type { CreateRoomRequest, JoinRoomResult, LobbyRoom, Room } from "../../shared/src/types.ts";
+import type { CreateRoomRequest, LobbyRoom, Room } from "../../shared/src/types.ts";
 import { logAction } from "./logging.ts";
 
 export class RoomNotFoundError extends Error {}
 export class RoomClosedError extends Error {}
-export class RoomFullError extends Error {}
 
-// Fixed by course spec, not something a creator can configure.
+// Fixed by course spec, not something a creator can configure. Enforced
+// against live presence (server/src/presence.ts's canAdmit), never against
+// the persisted membership below.
 export const MAX_ROOM_USERS = 12;
 
 // CLAUDE.md's Rooms section: "closure after 2 hours of inactivity."
@@ -129,72 +130,63 @@ export function getActiveRoomByCode(db: DatabaseSync, code: string, nowMs: numbe
   return row ? rowToRoom(row) : undefined;
 }
 
-export function getOccupancy(db: DatabaseSync, roomId: string): number {
-  const row = db.prepare("SELECT COUNT(*) AS n FROM room_participants WHERE roomId = ?").get(roomId) as {
-    n: number;
-  };
-  return row.n;
+// room_participants records which accounts have been admitted to a room —
+// its creator, and anyone who has joined it (for a PRIVATE room, only ever by
+// its 6-digit code). It is membership, not presence: nothing is removed when
+// someone leaves, and it's never what capacity is counted against (see
+// MAX_ROOM_USERS). What it gates is re-entry: a PRIVATE room's socket join
+// requires it (server/src/realtime.ts), so a bare roomId never gets anyone in.
+export function isRoomMember(db: DatabaseSync, roomId: string, accountId: string): boolean {
+  return db.prepare("SELECT 1 FROM room_participants WHERE roomId = ? AND accountId = ?").get(roomId, accountId) !== undefined;
 }
 
-export function listPublicLobby(db: DatabaseSync, nowMs: number = Date.now()): LobbyRoom[] {
+function recordMembership(db: DatabaseSync, roomId: string, accountId: string, nowMs: number): void {
+  db.prepare("INSERT OR IGNORE INTO room_participants (roomId, accountId, joinedAt) VALUES (?, ?, ?)").run(
+    roomId,
+    accountId,
+    new Date(nowMs).toISOString(),
+  );
+}
+
+// occupancyOf is how many people are in a room right now — live presence
+// (server/src/presence.ts), which this module has no access to by design, so
+// the caller supplies it.
+export function listPublicLobby(
+  db: DatabaseSync,
+  occupancyOf: (roomId: string) => number,
+  nowMs: number = Date.now(),
+): LobbyRoom[] {
   sweepInactiveRooms(db, nowMs);
   const rows = db
     .prepare(
-      `SELECT roomId, name, maxUsers,
-              (SELECT COUNT(*) FROM room_participants WHERE roomId = rooms.roomId) AS occupancy
+      `SELECT roomId, name, maxUsers
          FROM rooms
         WHERE visibility = 'PUBLIC' AND closed = 0
         ORDER BY createdAt ASC`,
     )
-    .all() as { roomId: string; name: string; maxUsers: number; occupancy: number }[];
+    .all() as { roomId: string; name: string; maxUsers: number }[];
 
-  return rows.map((r) => ({
-    roomId: r.roomId,
-    name: r.name,
-    occupancy: r.occupancy,
-    capacity: r.maxUsers,
-    joinable: r.occupancy < r.maxUsers,
-  }));
+  return rows.map((r) => {
+    const occupancy = occupancyOf(r.roomId);
+    return { roomId: r.roomId, name: r.name, occupancy, capacity: r.maxUsers, joinable: occupancy < r.maxUsers };
+  });
 }
 
-// The capacity check and the participant insert are one SQL statement, not a
-// separate SELECT-then-INSERT: node:sqlite is fully synchronous and nothing
-// here ever awaits, so no other request can interleave between "check" and
-// "write" in this single-threaded process. That makes the race structurally
-// impossible rather than merely unlikely — see rooms.test.ts's concurrent
-// join test.
-export function joinRoom(db: DatabaseSync, roomId: string, accountId: string, nowMs: number = Date.now()): JoinRoomResult {
+// Admits `accountId` to an open room (idempotently) and counts as meaningful
+// activity. It deliberately does not check capacity: that's measured against
+// who is present right now, which only the realtime layer knows — callers
+// check presence.canAdmit in the same synchronous turn first.
+export function joinRoom(db: DatabaseSync, roomId: string, accountId: string, nowMs: number = Date.now()): Room {
   const room = getRoomById(db, roomId, nowMs);
   if (!room) throw new RoomNotFoundError(`no room with id ${roomId}`);
   if (room.closed) throw new RoomClosedError(`room ${roomId} is closed`);
 
-  const now = new Date(nowMs).toISOString();
-  const result = db
-    .prepare(
-      `INSERT INTO room_participants (roomId, accountId, joinedAt)
-       SELECT ?, ?, ?
-        WHERE (SELECT COUNT(*) FROM room_participants WHERE roomId = ?) < ?
-          AND NOT EXISTS (SELECT 1 FROM room_participants WHERE roomId = ? AND accountId = ?)`,
-    )
-    .run(roomId, accountId, now, roomId, room.maxUsers, roomId, accountId);
-
-  if (result.changes === 0) {
-    // The insert only ever no-ops for one of two reasons: the room was
-    // already full, or this account is already a participant (idempotent
-    // re-join, which is not an error).
-    const alreadyJoined = db
-      .prepare("SELECT 1 FROM room_participants WHERE roomId = ? AND accountId = ?")
-      .get(roomId, accountId);
-    if (!alreadyJoined) {
-      throw new RoomFullError(`room ${roomId} is full`);
-    }
-  }
-
+  recordMembership(db, roomId, accountId, nowMs);
   // "join" is meaningful activity (CLAUDE.md's Rooms section) — covers both
   // a fresh join and an idempotent re-join alike.
   touchRoomActivity(db, roomId, nowMs);
 
-  return { room, occupancy: getOccupancy(db, roomId) };
+  return room;
 }
 
 export function createRoom(db: DatabaseSync, request: CreateRoomRequest): Room {
@@ -231,6 +223,9 @@ export function createRoom(db: DatabaseSync, request: CreateRoomRequest): Room {
     room.lastMeaningfulActivityAt,
     room.closed ? 1 : 0,
   );
+  // The creator is the one account admitted to a PRIVATE room without its
+  // code — it's handed the code by this very call.
+  recordMembership(db, room.roomId, room.creatorAccountId, nowMs);
 
   logAction(db, { action: "ROOM_CREATE", result: "ok", roomId: room.roomId, accountId: room.creatorAccountId }, nowMs);
 

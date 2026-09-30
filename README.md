@@ -23,7 +23,9 @@ Broadcasting has one operator; a shared room has none. Play, pause, skip,
 seek, queue removal, and reorder all require a vote — a 15-second window,
 YES/NO, non-responses counted as abstain and excluded from the denominator,
 a minimum of two non-abstaining votes, and `floor(validVotes / 2) + 1`
-required yeses, with a tie failing (`shared/src/voting.ts`). Every proposal
+required yeses, with a tie failing (`shared/src/voting.ts`). Someone alone in
+a room has nobody to vote with, so their own proposals pass straight away
+rather than never. Every proposal
 carries the playback or queue revision it was opened against, so a vote that
 resolves late can never land on a state that has already moved on. Voting
 only guards actions that take something away from the room; adding a song,
@@ -55,7 +57,8 @@ leaderboard.
 
 ## Why YouTube, despite the constraints
 
-Only the official Data API v3 and the visible IFrame Player are used — never
+Only YouTube's official oEmbed endpoint (for video details) and the visible
+IFrame Player are used — never
 `yt-dlp`, audio extraction, or hidden playback. That rules out
 sample-perfect audio sync: ads, buffering, and per-viewer autoplay
 restrictions all exist. The server never chases perfect alignment; it holds

@@ -456,8 +456,10 @@ describe("ProposalManager", () => {
     spy.mockRestore();
     consoleSpy.mockRestore();
 
-    // Playback is exactly as it was before the vote — no half-applied skip.
+    // Playback is exactly as it was before the vote — no half-applied skip:
+    // the track is still current, and still in the queue.
     expect(getCurrentPlayback(db, roomId)).toEqual(before);
+    expect(listQueue(db, roomId).some((q) => q.queueItemId === before.queueItemId)).toBe(true);
 
     const resolutions = emitted.filter((e) => e.event === "proposal:update").map((e) => e.payload as ProposalBroadcast);
     const last = resolutions[resolutions.length - 1];
@@ -482,7 +484,7 @@ describe("ProposalManager", () => {
     });
     expect(requested.ok).toBe(true);
 
-    manager.handleTrackEnded(io, db, roomId, before.playbackId);
+    manager.handleTrackEnded(io, db, roomId, before.playbackId, { accountId: alice.accountId, presentCount: 1 });
 
     // Invalidated synchronously: no more active proposal, and the room has
     // already moved on, well before the original 30ms window would fire.
@@ -509,7 +511,7 @@ describe("ProposalManager", () => {
     const { io, emitted } = fakeIo();
     const before = getCurrentPlayback(db, roomId)!;
 
-    manager.handleTrackEnded(io, db, roomId, "not-the-real-playback-id");
+    manager.handleTrackEnded(io, db, roomId, "not-the-real-playback-id", { accountId: alice.accountId, presentCount: 1 });
 
     expect(getCurrentPlayback(db, roomId)?.playbackId).toBe(before.playbackId);
     expect(emitted).toHaveLength(0);
@@ -524,12 +526,12 @@ describe("ProposalManager", () => {
     const b = await addTrack(db, roomId, bob.accountId, SONG_ID, { resolveMetadata });
     await addTrack(db, roomId, bob.accountId, SONG_ID, { resolveMetadata }); // C, should never be reached
 
-    manager.handleTrackEnded(io, db, roomId, before.playbackId);
+    manager.handleTrackEnded(io, db, roomId, before.playbackId, { accountId: alice.accountId, presentCount: 1 });
     const afterFirst = getCurrentPlayback(db, roomId);
     expect(afterFirst?.queueItemId).toBe(b.queueItemId);
 
     // Second, late report still names the now-superseded playbackId.
-    manager.handleTrackEnded(io, db, roomId, before.playbackId);
+    manager.handleTrackEnded(io, db, roomId, before.playbackId, { accountId: alice.accountId, presentCount: 1 });
     const afterSecond = getCurrentPlayback(db, roomId);
     expect(afterSecond?.queueItemId).toBe(b.queueItemId);
     expect(afterSecond?.playbackId).toBe(afterFirst?.playbackId);
@@ -797,7 +799,7 @@ describe("ProposalManager", () => {
     if (!requested.ok) return;
     manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "YES");
 
-    manager.handleTrackEnded(io, db, roomId, before.playbackId);
+    manager.handleTrackEnded(io, db, roomId, before.playbackId, { accountId: alice.accountId, presentCount: 1 });
 
     expect(manager.getActiveProposal(roomId)).toBeNull();
     expect(listQueue(db, roomId).some((q) => q.queueItemId === b.queueItemId)).toBe(true); // never removed
@@ -961,6 +963,26 @@ describe("ProposalManager", () => {
     expect(manager.getActiveProposal(roomId)).toBeNull();
   });
 
+  it("rejects a REORDER_QUEUE request that would move a track in front of the playing one with a typed NOT_UPCOMING error, spending nothing", async () => {
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+    const current = getCurrentPlayback(db, roomId)!;
+    const b = await addTrack(db, roomId, bob.accountId, SONG_ID, { resolveMetadata });
+    // Order is [a (playing), b]: moving b before a would mean b never plays.
+
+    const result = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "REORDER_QUEUE", {
+      votingWindowMs: 5_000,
+      queueItemId: b.queueItemId,
+      beforeQueueItemId: current.queueItemId,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.code).toBe("NOT_UPCOMING");
+    expect(manager.getActiveProposal(roomId)).toBeNull();
+    expect(getReorderTokenBalance(db, roomId, alice.accountId).tokens).toBe(5);
+  });
+
   it("rejects a REORDER_QUEUE request from an account with no reorder tokens remaining with a typed NO_REORDER_TOKENS error", async () => {
     const manager = new ProposalManager();
     const { io } = fakeIo();
@@ -982,6 +1004,90 @@ describe("ProposalManager", () => {
     if (result.ok) return;
     expect(result.code).toBe("NO_REORDER_TOKENS");
     expect(manager.getActiveProposal(roomId)).toBeNull();
+  });
+});
+
+// Regression: any one client's playback:ended used to advance the room with no
+// vote — including one sent because someone dragged the visible player's own
+// scrubber to the end. With the track's length known, the server now checks
+// the report against its own anchor first.
+describe("ProposalManager with a known track length", () => {
+  let dir: string;
+  let db: DatabaseSync;
+  let roomId: string;
+  let alice: Account;
+
+  const LENGTH_MS = 200_000;
+  const resolveMetadata = async (videoId: string): Promise<YoutubeVideoMetadata | null> => ({
+    videoId,
+    title: "Timed song",
+    channelTitle: "Channel",
+    thumbnailUrl: "https://example.com/t.jpg",
+    embeddable: true,
+    durationMs: LENGTH_MS,
+  });
+
+  beforeEach(async () => {
+    dir = mkdtempSync(path.join(tmpdir(), "echo-room-proposals-duration-"));
+    db = openDatabase(path.join(dir, "echo-room.sqlite"));
+    alice = registerAccount(db, "client-alice", "Alice");
+    roomId = createRoom(db, { accountId: alice.accountId, name: "Room", visibility: "PUBLIC", autoCloseEnabled: false })
+      .roomId;
+    const first = await addTrack(db, roomId, alice.accountId, SONG_ID, { resolveMetadata });
+    ensureCurrentTrack(db, roomId, first.queueItemId);
+    await addTrack(db, roomId, alice.accountId, SONG_ID, { resolveMetadata });
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function rewindAnchorBy(ms: number): void {
+    db.prepare("UPDATE room_playback SET anchorServerTimeMs = anchorServerTimeMs - ? WHERE roomId = ?").run(ms, roomId);
+  }
+
+  it("ignores a track-ended report that arrives long before the track can be over", () => {
+    const manager = new ProposalManager();
+    const { io, emitted } = fakeIo();
+    const before = getCurrentPlayback(db, roomId)!;
+    rewindAnchorBy(30_000); // 30s into a 200s track
+
+    manager.handleTrackEnded(io, db, roomId, before.playbackId, { accountId: alice.accountId, presentCount: 1 });
+
+    const after = getCurrentPlayback(db, roomId)!;
+    expect(after.playbackId).toBe(before.playbackId);
+    expect(after.revision).toBe(before.revision);
+    expect(emitted.some((e) => e.event === "playback:update")).toBe(false);
+  });
+
+  it("advances on a track-ended report once the room's anchor has reached the end", () => {
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+    const before = getCurrentPlayback(db, roomId)!;
+    rewindAnchorBy(LENGTH_MS - 2_000); // within the tolerance of the end
+
+    manager.handleTrackEnded(io, db, roomId, before.playbackId, { accountId: alice.accountId, presentCount: 1 });
+
+    expect(getCurrentPlayback(db, roomId)?.playbackId).not.toBe(before.playbackId);
+  });
+
+  it("rejects a SEEK past the end of the track without opening a vote", () => {
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+
+    const result = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "SEEK", {
+      votingWindowMs: 5_000,
+      positionMs: LENGTH_MS + 1,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(manager.getActiveProposal(roomId)).toBeNull();
+    expect(
+      manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "SEEK", { votingWindowMs: 5_000, positionMs: LENGTH_MS })
+        .ok,
+    ).toBe(true);
+    manager.dispose();
   });
 });
 
@@ -1114,22 +1220,26 @@ describe("ProposalManager touches room activity", () => {
   });
 
   it("a successful reorder touches activity", async () => {
-    const second = await addTrack(db, roomId, alice.accountId, "bbbbbbbbbbb", {
-      resolveMetadata: async (videoId) => ({
-        videoId,
-        title: "Song B",
-        channelTitle: "Channel B",
-        thumbnailUrl: "https://example.com/b.jpg",
-        embeddable: true,
-      }),
-    });
+    const upcoming = async () =>
+      addTrack(db, roomId, alice.accountId, "bbbbbbbbbbb", {
+        resolveMetadata: async (videoId) => ({
+          videoId,
+          title: "Song B",
+          channelTitle: "Channel B",
+          thumbnailUrl: "https://example.com/b.jpg",
+          embeddable: true,
+        }),
+      });
+    // [first (playing), second, third] — reorder among the two still to come.
+    const second = await upcoming();
+    const third = await upcoming();
 
     const manager = new ProposalManager();
     const { io } = fakeIo();
     const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "REORDER_QUEUE", {
       votingWindowMs: 20,
-      queueItemId: second.queueItemId,
-      beforeQueueItemId: firstQueueItemId,
+      queueItemId: third.queueItemId,
+      beforeQueueItemId: second.queueItemId,
     });
     expect(requested.ok).toBe(true);
     if (!requested.ok) return;
@@ -1139,5 +1249,122 @@ describe("ProposalManager touches room activity", () => {
     await sleep(60);
 
     expect(getRoomById(db, roomId)!.lastMeaningfulActivityAt).not.toBe(STALE);
+  });
+});
+
+// Regression: a vote needs 2 non-abstain votes, so a room with one person in
+// it could never pass anything — once paused (every server restart pauses a
+// playing room) it stayed paused for good. Now the only person present gets
+// their own proposal through at once (docs/adr/0004).
+describe("ProposalManager with a sole listener", () => {
+  let dir: string;
+  let db: DatabaseSync;
+  let roomId: string;
+  let alice: Account;
+  let bob: Account;
+  const SOLO = { presentCount: 1, votingWindowMs: 5_000 };
+
+  const resolveMetadata = async (videoId: string): Promise<YoutubeVideoMetadata | null> => ({
+    videoId,
+    title: "Song",
+    channelTitle: "Channel",
+    thumbnailUrl: "https://example.com/s.jpg",
+    embeddable: true,
+  });
+
+  beforeEach(async () => {
+    dir = mkdtempSync(path.join(tmpdir(), "echo-room-proposals-solo-"));
+    db = openDatabase(path.join(dir, "echo-room.sqlite"));
+    alice = registerAccount(db, "client-alice", "Alice");
+    bob = registerAccount(db, "client-bob", "Bob");
+    roomId = createRoom(db, { accountId: alice.accountId, name: "Room", visibility: "PUBLIC", autoCloseEnabled: false })
+      .roomId;
+    const first = await addTrack(db, roomId, alice.accountId, SONG_ID, { resolveMetadata });
+    ensureCurrentTrack(db, roomId, first.queueItemId);
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("passes and applies the only listener's proposal at once, with no vote left open", () => {
+    const manager = new ProposalManager();
+    const { io, emitted } = fakeIo();
+
+    const result = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "PAUSE", SOLO);
+
+    expect(result.ok && result.proposal.state).toBe("PASSED");
+    expect(getCurrentPlayback(db, roomId)?.status).toBe("PAUSED");
+    expect(manager.getActiveProposal(roomId)).toBeNull();
+    const updates = emitted.filter((e) => e.event === "proposal:update").map((e) => e.payload as ProposalBroadcast);
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({ proposal: { state: "PASSED" }, applied: true });
+
+    // And back again: the room is never stuck paused with one person in it.
+    manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "PLAY", SOLO);
+    expect(getCurrentPlayback(db, roomId)?.status).toBe("PLAYING");
+  });
+
+  it("drops a skipped track from the queue and tells the room", async () => {
+    const manager = new ProposalManager();
+    const { io, emitted } = fakeIo();
+    const skipped = getCurrentPlayback(db, roomId)!.queueItemId;
+    const next = await addTrack(db, roomId, alice.accountId, SONG_ID, { resolveMetadata });
+
+    manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "SKIP", SOLO);
+
+    expect(listQueue(db, roomId).map((q) => q.queueItemId)).toEqual([next.queueItemId]);
+    expect(emitted).toContainEqual({ roomId, event: "queue:itemRemoved", payload: { queueItemId: skipped } });
+  });
+
+  it("drops a track that played to its end from the queue and tells the room", async () => {
+    const manager = new ProposalManager();
+    const { io, emitted } = fakeIo();
+    const ended = getCurrentPlayback(db, roomId)!;
+    const next = await addTrack(db, roomId, alice.accountId, SONG_ID, { resolveMetadata });
+
+    manager.handleTrackEnded(io, db, roomId, ended.playbackId, { accountId: alice.accountId, presentCount: 1 });
+
+    expect(listQueue(db, roomId).map((q) => q.queueItemId)).toEqual([next.queueItemId]);
+    expect(emitted).toContainEqual({ roomId, event: "queue:itemRemoved", payload: { queueItemId: ended.queueItemId } });
+  });
+
+  it("still enforces every request-time rule for a sole listener", () => {
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+    db.prepare("UPDATE queue_items SET addedBy = ? WHERE roomId = ?").run(bob.accountId, roomId); // Bob is the DJ
+
+    const seek = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "SEEK", { ...SOLO, positionMs: 10_000 });
+    expect(!seek.ok && seek.code).toBe("NOT_CURRENT_DJ");
+    const play = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "PLAY", SOLO);
+    expect(play.ok).toBe(false); // already playing
+  });
+
+  it("spends a reorder token on a sole listener's reorder, just as on a passed vote", async () => {
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+    const b = await addTrack(db, roomId, alice.accountId, SONG_ID, { resolveMetadata });
+    const c = await addTrack(db, roomId, alice.accountId, SONG_ID, { resolveMetadata });
+
+    manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "REORDER_QUEUE", {
+      ...SOLO,
+      queueItemId: c.queueItemId,
+      beforeQueueItemId: b.queueItemId,
+    });
+
+    expect(listQueue(db, roomId).map((q) => q.queueItemId).slice(1)).toEqual([c.queueItemId, b.queueItemId]);
+    expect(getReorderTokenBalance(db, roomId, alice.accountId).tokens).toBe(4);
+  });
+
+  it("opens an ordinary vote as soon as a second person is present", () => {
+    const manager = new ProposalManager();
+    const { io } = fakeIo();
+
+    const result = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "PAUSE", { presentCount: 2, votingWindowMs: 5_000 });
+
+    expect(result.ok && result.proposal.state).toBe("OPEN");
+    expect(getCurrentPlayback(db, roomId)?.status).toBe("PLAYING");
+    manager.dispose();
   });
 });

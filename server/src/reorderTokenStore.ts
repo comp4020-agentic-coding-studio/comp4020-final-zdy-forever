@@ -12,9 +12,8 @@ import type { ReorderTokenBalance } from "../../shared/src/types.ts";
 // Persists reorder-token accounting (see shared/src/reorderTokens.ts for the
 // pure regeneration math this wraps) per docs/adr/0001-reorder-token-scope.md:
 // balances are scoped per (roomId, accountId), not per account globally.
-// Drag-and-drop reordering and REORDER_QUEUE voting are not wired up yet —
-// this module only exposes "what's the current balance" and "spend one,"
-// for a future REORDER_QUEUE resolution path to call.
+// This module only exposes "what's the current balance" and "spend one,"
+// for the REORDER_QUEUE resolution path (server/src/proposals.ts) to call.
 
 function getRawState(db: DatabaseSync, roomId: string, accountId: string): ReorderTokenState | undefined {
   const row = db
@@ -59,8 +58,7 @@ export type ConsumeReorderTokenResult =
 
 // The only path that ever persists reorder-token state. Per CLAUDE.md,
 // "consume one token only after a reorder vote passes and a real reorder
-// succeeds" — so the (not yet implemented) REORDER_QUEUE resolution path
-// must call this only once its own vote and mutation have both already
+// succeeds" — so the REORDER_QUEUE resolution path must call this only once its own vote and mutation have both already
 // succeeded, never speculatively up front. A failed attempt (ok: false, no
 // tokens available) writes nothing at all — "failed, stale or no-op reorder
 // attempts cost nothing" holds literally, not just in the returned balance.

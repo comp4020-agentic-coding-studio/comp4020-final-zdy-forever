@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { io, type Socket } from "socket.io-client";
-import { classifyDrift, computeExpectedPositionMs } from "../../shared/src/playbackSync.ts";
+import { classifyDrift, computeExpectedPositionMs, isPlausibleTrackEnd } from "../../shared/src/playbackSync.ts";
 import type {
   PlaybackState,
   PresenceEntry,
@@ -12,7 +12,8 @@ import type {
   Room,
   RoomSnapshot,
 } from "../../shared/src/types.ts";
-import type { Proposal, VoteChoice } from "../../shared/src/voting.ts";
+import type { Proposal, ProposalBroadcast, VoteChoice } from "../../shared/src/voting.ts";
+import { applyProposalUpdate, proposalViewFromSnapshot } from "./proposalView.ts";
 import { YT_PLAYER_STATE, type YoutubePlayerHandle } from "./YoutubePlayer.tsx";
 
 // A local poll against the player's own getCurrentTime(), never a network
@@ -62,11 +63,14 @@ export interface RoomLiveState {
   queue: QueueItem[];
   presence: PresenceEntry[];
   playback: PlaybackState | null;
-  // The room's single in-flight PLAY/PAUSE vote, or null if none is open.
+  // The room's single in-flight (OPEN) vote, or null if none is open.
   // Seeded from room:snapshot on (re)join so a late joiner or a reconnecting
   // client sees an in-progress vote immediately, then kept current by
-  // proposal:update.
+  // proposal:update (see proposalView.ts).
   activeProposal: Proposal | null;
+  // The most recent resolved verdict, shown alongside (never instead of) the
+  // controls once its vote has closed.
+  lastProposalResult: ProposalBroadcast | null;
   proposalError: string | null;
   // This client's own reorder-token balance in this room, or null before the
   // initial fetch (right after join) has resolved. Always server-computed
@@ -92,6 +96,7 @@ const EMPTY_STATE: RoomLiveState = {
   presence: [],
   playback: null,
   activeProposal: null,
+  lastProposalResult: null,
   proposalError: null,
   reorderTokenBalance: null,
   reactionHistory: [],
@@ -137,20 +142,31 @@ export function usePlaybackSync(
   // Applies a freshly-received anchor to the local player exactly once —
   // this, not a continuous stream, is the entire mechanism for late-join and
   // reconnect sync (CLAUDE.md: "reconnect and late join must start from an
-  // authoritative room snapshot").
-  function applyAnchor(playback: PlaybackState | null) {
-    playbackRef.current = playback;
-    const player = playerRef.current;
-    if (!player || !playback) return;
+  // authoritative room snapshot"). Only refs are read, so it's stable.
+  const applyAnchor = useCallback(
+    (playback: PlaybackState | null) => {
+      playbackRef.current = playback;
+      const player = playerRef.current;
+      if (!player || !playback) return;
+      // Only ever aimed at the room's own video. On a track change this runs
+      // before the player has switched, and would otherwise seek and play
+      // the previous track for a moment; the player's onReady once it has
+      // loaded the new one (handlePlayerReady below) applies it instead.
+      if (player.getVideoId() !== playback.videoId) return;
 
-    const expectedMs = computeExpectedPositionMs(playback, Date.now());
-    player.seekTo(expectedMs / 1000);
-    if (playback.status === "PLAYING") {
-      player.playVideo();
-    } else {
-      player.pauseVideo();
-    }
-  }
+      const expectedMs = computeExpectedPositionMs(playback, Date.now());
+      if (playback.status === "PLAYING") {
+        player.seekTo(expectedMs / 1000);
+        player.playVideo();
+      } else {
+        // Pause first: a paused YouTube player stays paused when it seeks,
+        // so parking it can never itself set it playing again.
+        player.pauseVideo();
+        player.seekTo(expectedMs / 1000);
+      }
+    },
+    [playerRef],
+  );
 
   useEffect(() => {
     if (!roomId || !accountId || !clientId) {
@@ -176,9 +192,17 @@ export function usePlaybackSync(
       setState((s) => ({ ...s, connected: false, joinError: error }));
     });
 
+    // The room auto-closed (2 hours with no activity) and the server has
+    // already let this socket go — reported like a failed join, since either
+    // way this client is no longer in the room.
+    socket.on("room:closed", () => {
+      setState((s) => ({ ...s, connected: false, joinError: "this room closed after 2 hours with no activity" }));
+    });
+
     socket.on("room:snapshot", (snapshot: RoomSnapshot) => {
       reactionHistoryRef.current = snapshot.reactionHistory;
       firedEchoIdsRef.current = new Set();
+      const proposalView = proposalViewFromSnapshot(snapshot.activeProposal);
       setState((s) => ({
         connected: true,
         joinError: null,
@@ -186,7 +210,8 @@ export function usePlaybackSync(
         queue: snapshot.queue,
         presence: snapshot.presence,
         playback: snapshot.playback,
-        activeProposal: snapshot.activeProposal,
+        activeProposal: proposalView.active,
+        lastProposalResult: proposalView.lastResult,
         proposalError: null,
         reorderTokenBalance: s.reorderTokenBalance,
         reactionHistory: snapshot.reactionHistory,
@@ -218,10 +243,13 @@ export function usePlaybackSync(
 
     // The server's authoritative verdict on the room's single active
     // proposal (open, or just resolved) — never something the client
-    // computes itself. A resolved proposal briefly stays visible (e.g. to
-    // show "passed") until the next request clears it.
-    socket.on("proposal:update", ({ proposal }: { proposal: Proposal; applied: boolean }) => {
-      setState((s) => ({ ...s, activeProposal: proposal, proposalError: null }));
+    // computes itself. A resolved one moves out of activeProposal into
+    // lastProposalResult, so the controls come back as soon as a vote closes.
+    socket.on("proposal:update", (update: ProposalBroadcast) => {
+      setState((s) => {
+        const view = applyProposalUpdate({ active: s.activeProposal, lastResult: s.lastProposalResult }, update);
+        return { ...s, activeProposal: view.active, lastProposalResult: view.lastResult, proposalError: null };
+      });
     });
 
     socket.on("proposal:requestError", ({ error }: { error: string }) => {
@@ -236,10 +264,11 @@ export function usePlaybackSync(
       setState((s) => (s.queue.some((q) => q.queueItemId === item.queueItemId) ? s : { ...s, queue: [...s.queue, item] }));
     });
 
-    // A passed REMOVE_QUEUE_ITEM vote actually removed this item (see
-    // ProposalManager.resolveRoom) — filtered by queueItemId, never by
-    // position, so this can never drop the wrong (unrelated) row even if the
-    // local queue array has drifted out of order relative to the server.
+    // An item left the queue: a passed REMOVE_QUEUE_ITEM vote removed it, or
+    // it finished playing (ended or skipped — see ProposalManager). Filtered
+    // by queueItemId, never by position, so this can never drop the wrong
+    // (unrelated) row even if the local queue array has drifted out of order
+    // relative to the server.
     socket.on("queue:itemRemoved", ({ queueItemId }: { queueItemId: string }) => {
       setState((s) => ({ ...s, queue: s.queue.filter((q) => q.queueItemId !== queueItemId) }));
     });
@@ -308,7 +337,17 @@ export function usePlaybackSync(
       firedEchoIdsRef.current = new Set();
       setState(EMPTY_STATE);
     };
-  }, [roomId, accountId, clientId, pushDisplayedReaction]);
+  }, [roomId, accountId, clientId, pushDisplayedReaction, applyAnchor]);
+
+  // Wired to <YoutubePlayer onReady>. A late joiner's snapshot (or a track
+  // transition's playback:update) usually lands before the player exists or
+  // has loaded that video, so applyAnchor had nothing to act on and the
+  // player just autoplayed from 0 — even into a PAUSED room, where the drift
+  // loop below never runs to correct it. Re-applying the latest anchor once
+  // the player is ready with the room's video fixes both.
+  const handlePlayerReady = useCallback(() => {
+    applyAnchor(playbackRef.current);
+  }, [applyAnchor]);
 
   // Requests a PLAY/PAUSE/SKIP proposal — never mutates local playback state
   // itself; the server's proposal:update/playback:update events are the only
@@ -365,14 +404,38 @@ export function usePlaybackSync(
   // only while a room's own track is actually loaded (playbackRef.current is
   // null whenever the visible video is just a locally-browsed one, not the
   // room's authoritative track) — the server independently re-checks the
-  // reported playbackId anyway (see ProposalManager.handleTrackEnded), so
-  // this is best-effort, not itself a trust boundary.
-  const handlePlayerStateChange = useCallback((playerState: number) => {
-    if (playerState !== YT_PLAYER_STATE.ENDED) return;
-    const current = playbackRef.current;
-    if (!current) return;
-    socketRef.current?.emit("playback:ended", { playbackId: current.playbackId });
-  }, []);
+  // reported playbackId and whether the track can be over yet anyway (see
+  // ProposalManager.handleTrackEnded), so this is best-effort, not itself a
+  // trust boundary.
+  const handlePlayerStateChange = useCallback(
+    (playerState: number) => {
+      const current = playbackRef.current;
+      if (!current) return;
+      // The room is paused but this player just started — someone pressed
+      // YouTube's own play button. Only the room decides; letting it run
+      // meant the track could play (and end) here while the room stayed put.
+      if (playerState === YT_PLAYER_STATE.PLAYING && current.status === "PAUSED") {
+        applyAnchor(current);
+        return;
+      }
+      if (playerState !== YT_PLAYER_STATE.ENDED) return;
+      // The server rarely knows a track's length now (YouTube's oEmbed
+      // doesn't report one), but this player does once the video has loaded.
+      // It only decides what this client does, never what the room does.
+      const localDurationSeconds = playerRef.current?.getDuration() ?? 0;
+      const durationMs = current.durationMs ?? (localDurationSeconds > 0 ? localDurationSeconds * 1000 : null);
+      if (!isPlausibleTrackEnd({ ...current, durationMs }, Date.now())) {
+        // This player hit the end long before the room did — typically
+        // someone dragged YouTube's own scrubber there. Skipping needs a
+        // vote, so rather than report an end the server wouldn't act on,
+        // put this player back where the room actually is.
+        applyAnchor(current);
+        return;
+      }
+      socketRef.current?.emit("playback:ended", { playbackId: current.playbackId });
+    },
+    [applyAnchor, playerRef],
+  );
 
   // The local drift-correction loop — polls the player's own clock, never
   // the network. Suspended entirely unless the local player itself reports
@@ -383,6 +446,11 @@ export function usePlaybackSync(
       const player = playerRef.current;
       const playback = playbackRef.current;
       if (!player || !playback || playback.status !== "PLAYING") {
+        // A paused room's player playing anyway (see handlePlayerStateChange)
+        // is caught here too, should that state change ever be missed.
+        if (player && playback?.status === "PAUSED" && player.getPlayerState() === YT_PLAYER_STATE.PLAYING) {
+          applyAnchor(playback);
+        }
         wasPlayingRef.current = false;
         return;
       }
@@ -411,7 +479,7 @@ export function usePlaybackSync(
     }, DRIFT_POLL_INTERVAL_MS);
 
     return () => clearInterval(interval);
-  }, [playerRef]);
+  }, [playerRef, applyAnchor]);
 
   // The historical-echo loop: purely local, checks the player's own current
   // position against reactionHistory looking for a not-yet-fired reaction
@@ -446,6 +514,7 @@ export function usePlaybackSync(
     requestReorderQueueProposal,
     castProposalVote,
     handlePlayerStateChange,
+    handlePlayerReady,
     sendReaction,
   };
 }

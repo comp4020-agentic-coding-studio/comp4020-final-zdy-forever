@@ -10,14 +10,13 @@ import {
   createRoom,
   generateActiveRoomCode,
   getActiveRoomByCode,
-  getOccupancy,
   getRoomById,
   isAutoCloseDue,
+  isRoomMember,
   joinRoom,
   listPublicLobby,
   MAX_ROOM_USERS,
   RoomClosedError,
-  RoomFullError,
   RoomNotFoundError,
   touchRoomActivity,
 } from "./rooms.ts";
@@ -154,7 +153,7 @@ describe("rooms", () => {
     expect(found).toEqual(created);
   });
 
-  it("joins a public room and increments occupancy", () => {
+  it("records a joining account as a member of the room", () => {
     const room = createRoom(db, {
       accountId: creatorAccountId,
       name: "Public room",
@@ -162,11 +161,23 @@ describe("rooms", () => {
       autoCloseEnabled: false,
     });
     const joinerId = registerAccount(db, "client-joiner", "Joiner").accountId;
+    expect(isRoomMember(db, room.roomId, joinerId)).toBe(false);
 
-    const result = joinRoom(db, room.roomId, joinerId);
+    const joined = joinRoom(db, room.roomId, joinerId);
 
-    expect(result.occupancy).toBe(1);
-    expect(getOccupancy(db, room.roomId)).toBe(1);
+    expect(joined.roomId).toBe(room.roomId);
+    expect(isRoomMember(db, room.roomId, joinerId)).toBe(true);
+  });
+
+  it("admits the creator as a member of their own room, private or not", () => {
+    const room = createRoom(db, {
+      accountId: creatorAccountId,
+      name: "Secret",
+      visibility: "PRIVATE",
+      autoCloseEnabled: false,
+    });
+
+    expect(isRoomMember(db, room.roomId, creatorAccountId)).toBe(true);
   });
 
   it("is idempotent when the same account joins twice", () => {
@@ -179,10 +190,12 @@ describe("rooms", () => {
     const joinerId = registerAccount(db, "client-joiner", "Joiner").accountId;
 
     joinRoom(db, room.roomId, joinerId);
-    const second = joinRoom(db, room.roomId, joinerId);
+    joinRoom(db, room.roomId, joinerId);
 
-    expect(second.occupancy).toBe(1);
-    expect(getOccupancy(db, room.roomId)).toBe(1);
+    const rows = db
+      .prepare("SELECT COUNT(*) AS n FROM room_participants WHERE roomId = ? AND accountId = ?")
+      .get(room.roomId, joinerId) as { n: number };
+    expect(rows.n).toBe(1);
   });
 
   it("throws RoomNotFoundError for a nonexistent room", () => {
@@ -201,59 +214,23 @@ describe("rooms", () => {
     expect(() => joinRoom(db, room.roomId, creatorAccountId)).toThrow(RoomClosedError);
   });
 
-  it("throws RoomFullError once maxUsers participants have joined", () => {
+  // Regression: membership used to double as capacity, so a room whose
+  // twelfth visitor had come and gone stayed full forever. Capacity is now
+  // live presence (see presence.test.ts and realtime.test.ts's capacity
+  // tests); membership just keeps growing as people visit.
+  it("never caps membership: more than maxUsers accounts can join over a room's lifetime", () => {
     const room = createRoom(db, {
       accountId: creatorAccountId,
-      name: "Tiny room",
+      name: "Busy room",
       visibility: "PUBLIC",
       autoCloseEnabled: false,
     });
 
-    for (let i = 0; i < MAX_ROOM_USERS; i++) {
-      const accountId = registerAccount(db, `client-fill-${i}`, `User ${i}`).accountId;
+    for (let i = 0; i <= MAX_ROOM_USERS; i++) {
+      const accountId = registerAccount(db, `client-visitor-${i}`, `Visitor ${i}`).accountId;
       joinRoom(db, room.roomId, accountId);
+      expect(isRoomMember(db, room.roomId, accountId)).toBe(true);
     }
-    expect(getOccupancy(db, room.roomId)).toBe(MAX_ROOM_USERS);
-
-    const overflowId = registerAccount(db, "client-overflow", "Overflow").accountId;
-    expect(() => joinRoom(db, room.roomId, overflowId)).toThrow(RoomFullError);
-    expect(getOccupancy(db, room.roomId)).toBe(MAX_ROOM_USERS);
-  });
-
-  it("never lets 13 participants into a 12-capacity room under concurrent join attempts", () => {
-    const room = createRoom(db, {
-      accountId: creatorAccountId,
-      name: "Race room",
-      visibility: "PUBLIC",
-      autoCloseEnabled: false,
-    });
-
-    // Seed 11 existing participants, then race two more for the last slot.
-    for (let i = 0; i < MAX_ROOM_USERS - 1; i++) {
-      const accountId = registerAccount(db, `client-seed-${i}`, `Seed ${i}`).accountId;
-      joinRoom(db, room.roomId, accountId);
-    }
-    expect(getOccupancy(db, room.roomId)).toBe(MAX_ROOM_USERS - 1);
-
-    const racerA = registerAccount(db, "client-racer-a", "Racer A").accountId;
-    const racerB = registerAccount(db, "client-racer-b", "Racer B").accountId;
-
-    // node:sqlite is synchronous and joinRoom never awaits, so wrapping each
-    // call in a resolved-promise microtask is the closest thing to a genuine
-    // "simultaneous" race this single-threaded runtime allows: both attempts
-    // are queued before either runs, and the atomic INSERT ... SELECT inside
-    // joinRoom is what actually has to hold the line.
-    const attempt = (accountId: string) => Promise.resolve().then(() => joinRoom(db, room.roomId, accountId));
-
-    return Promise.allSettled([attempt(racerA), attempt(racerB)]).then((results) => {
-      const fulfilled = results.filter((r) => r.status === "fulfilled");
-      const rejected = results.filter((r) => r.status === "rejected");
-
-      expect(fulfilled).toHaveLength(1);
-      expect(rejected).toHaveLength(1);
-      expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(RoomFullError);
-      expect(getOccupancy(db, room.roomId)).toBe(MAX_ROOM_USERS);
-    });
   });
 
   it("finds an active private room by its code", () => {
@@ -293,10 +270,7 @@ describe("rooms", () => {
     });
     db.prepare("UPDATE rooms SET closed = 1 WHERE roomId = ?").run(closedRoom.roomId);
 
-    const joinerId = registerAccount(db, "client-joiner", "Joiner").accountId;
-    joinRoom(db, publicRoom.roomId, joinerId);
-
-    const lobby = listPublicLobby(db);
+    const lobby = listPublicLobby(db, (roomId) => (roomId === publicRoom.roomId ? 1 : 0));
 
     expect(lobby).toHaveLength(1);
     expect(lobby[0]).toEqual({
@@ -306,6 +280,18 @@ describe("rooms", () => {
       capacity: MAX_ROOM_USERS,
       joinable: true,
     });
+  });
+
+  it("reports a room as not joinable in the lobby only while it's full right now", () => {
+    const room = createRoom(db, {
+      accountId: creatorAccountId,
+      name: "Popular room",
+      visibility: "PUBLIC",
+      autoCloseEnabled: false,
+    });
+
+    expect(listPublicLobby(db, () => MAX_ROOM_USERS)[0]).toMatchObject({ roomId: room.roomId, joinable: false });
+    expect(listPublicLobby(db, () => MAX_ROOM_USERS - 1)[0]).toMatchObject({ roomId: room.roomId, joinable: true });
   });
 
   // CLAUDE.md's Rooms section: "auto close after 2 hours of inactivity,"
@@ -465,8 +451,8 @@ describe("rooms", () => {
         room.roomId,
       );
 
-      expect(listPublicLobby(db, T0 + AUTO_CLOSE_INACTIVITY_MS - 1)).toHaveLength(1);
-      expect(listPublicLobby(db, T0 + AUTO_CLOSE_INACTIVITY_MS)).toHaveLength(0);
+      expect(listPublicLobby(db, () => 0, T0 + AUTO_CLOSE_INACTIVITY_MS - 1)).toHaveLength(1);
+      expect(listPublicLobby(db, () => 0, T0 + AUTO_CLOSE_INACTIVITY_MS)).toHaveLength(0);
     });
 
     it("joinRoom rejects an auto-closed room with RoomClosedError, exactly like a manually closed room", () => {
@@ -526,10 +512,10 @@ describe("rooms", () => {
       expect(closed?.closed).toBe(true);
 
       // The room row itself is still there (only closed flipped), and the
-      // participant row from before closure is untouched.
+      // membership row from before closure is untouched.
       const rawRoom = db.prepare("SELECT roomId, name FROM rooms WHERE roomId = ?").get(room.roomId);
       expect(rawRoom).toEqual({ roomId: room.roomId, name: "Rich history room" });
-      expect(getOccupancy(db, room.roomId)).toBe(1);
+      expect(isRoomMember(db, room.roomId, joinerId)).toBe(true);
     });
   });
 });

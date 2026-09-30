@@ -56,6 +56,24 @@ export function classifyDrift(actualMs: number, expectedMs: number): DriftCorrec
   return "hard-resync";
 }
 
+// How far before a track's known end a reported "ended" is still believed. A
+// client can legitimately run a few seconds ahead of the anchor before drift
+// correction catches it (see DRIFT_HARD_RESYNC_MS), and YouTube reports
+// duration to the whole second. Anything earlier is a skip, not an end —
+// e.g. someone dragging the visible player's own scrubber to the end — and
+// skipping requires a vote (CLAUDE.md's Voting section).
+export const TRACK_END_TOLERANCE_MS = 10_000;
+
+// Whether a client's "my player reached the end" can be true, judged from
+// the authoritative anchor alone: the room's expected position must be
+// within TRACK_END_TOLERANCE_MS of the track's length. A PAUSED room never
+// gets there unless it was paused right at the end. With no known duration
+// there is nothing to check against, so the report is taken at its word.
+export function isPlausibleTrackEnd(state: PlaybackAnchor & { durationMs: number | null }, nowMs: number): boolean {
+  if (state.durationMs === null) return true;
+  return computeExpectedPositionMs(state, nowMs) >= state.durationMs - TRACK_END_TOLERANCE_MS;
+}
+
 export interface StaleCheckRef {
   playbackId: string;
   revision: number;

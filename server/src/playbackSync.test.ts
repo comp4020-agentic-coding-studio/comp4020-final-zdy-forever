@@ -4,7 +4,9 @@ import {
   computeExpectedPositionMs,
   DRIFT_HARD_RESYNC_MS,
   DRIFT_IGNORE_MS,
+  isPlausibleTrackEnd,
   isStaleReference,
+  TRACK_END_TOLERANCE_MS,
 } from "../../shared/src/playbackSync.ts";
 
 describe("computeExpectedPositionMs", () => {
@@ -65,5 +67,38 @@ describe("isStaleReference", () => {
 
   it("is stale when both differ", () => {
     expect(isStaleReference(base, { playbackId: "pb-0", revision: 2 })).toBe(true);
+  });
+});
+
+// Regression: any client's "my player ended" used to advance the room with no
+// vote, so dragging the visible player's own scrubber to the end skipped the
+// track for everyone.
+describe("isPlausibleTrackEnd", () => {
+  const T0 = 1_000_000;
+  const track = (overrides: Partial<Parameters<typeof isPlausibleTrackEnd>[0]>) => ({
+    status: "PLAYING" as const,
+    anchorPositionMs: 0,
+    anchorServerTimeMs: T0,
+    durationMs: 200_000,
+    ...overrides,
+  });
+
+  it("rejects an end reported well before the room's anchor reaches the track's length", () => {
+    expect(isPlausibleTrackEnd(track({}), T0 + 30_000)).toBe(false);
+  });
+
+  it("accepts an end within the tolerance of the track's length, or past it", () => {
+    expect(isPlausibleTrackEnd(track({}), T0 + 200_000 - TRACK_END_TOLERANCE_MS)).toBe(true);
+    expect(isPlausibleTrackEnd(track({}), T0 + 200_000)).toBe(true);
+    expect(isPlausibleTrackEnd(track({}), T0 + 260_000)).toBe(true);
+  });
+
+  it("never believes a PAUSED room's track ended unless it was paused right at the end", () => {
+    expect(isPlausibleTrackEnd(track({ status: "PAUSED", anchorPositionMs: 60_000 }), T0 + 999_000)).toBe(false);
+    expect(isPlausibleTrackEnd(track({ status: "PAUSED", anchorPositionMs: 195_000 }), T0)).toBe(true);
+  });
+
+  it("takes the report at its word when the track's length is unknown", () => {
+    expect(isPlausibleTrackEnd(track({ durationMs: null }), T0 + 1_000)).toBe(true);
   });
 });

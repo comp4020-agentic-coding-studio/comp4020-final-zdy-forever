@@ -61,6 +61,40 @@ export class PresenceStore {
     return { accountId: record.accountId, becameAbsent: !stillPresent };
   }
 
+  // How many distinct accounts are in the room right now — one account's
+  // several tabs count once. This, not anything persisted, is what CLAUDE.md's
+  // 12-user maximum is measured against: everyone who has *ever* joined used
+  // to count, so a room filled up for good after its twelfth visitor.
+  count(roomId: string): number {
+    const sockets = this.rooms.get(roomId);
+    if (!sockets) return 0;
+    return new Set([...sockets.values()].map((s) => s.accountId)).size;
+  }
+
+  isPresent(roomId: string, accountId: string): boolean {
+    const sockets = this.rooms.get(roomId);
+    return sockets ? [...sockets.values()].some((s) => s.accountId === accountId) : false;
+  }
+
+  // Whether `accountId` may take a place in the room: always, if it's already
+  // present (another tab of someone already counted), otherwise only while
+  // fewer than `capacity` accounts are. The caller must join() in the same
+  // synchronous turn, with no await in between, for this to be race-free.
+  canAdmit(roomId: string, accountId: string, capacity: number): boolean {
+    return this.isPresent(roomId, accountId) || this.count(roomId) < capacity;
+  }
+
+  // Every room with at least one socket in it right now.
+  roomIds(): string[] {
+    return [...this.rooms.keys()];
+  }
+
+  // Every socket currently in the room, e.g. to let them all go when it
+  // closes.
+  socketIdsIn(roomId: string): string[] {
+    return [...(this.rooms.get(roomId)?.keys() ?? [])];
+  }
+
   list(roomId: string): PresenceEntry[] {
     const sockets = this.rooms.get(roomId);
     if (!sockets) return [];

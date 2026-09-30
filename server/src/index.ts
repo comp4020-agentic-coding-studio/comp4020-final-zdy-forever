@@ -19,10 +19,18 @@ import type {
   YoutubeVideoMetadata,
 } from "../../shared/src/types.ts";
 import { parseYouTubeVideoId } from "../../shared/src/youtube.ts";
-import { getAccountById, registerAccount } from "./accounts.ts";
+import { getAccountByClientId, getAccountById, registerAccount } from "./accounts.ts";
 import { openDatabase } from "./db.ts";
 import { handleYoutubeError } from "./httpErrors.ts";
-import { ensureCurrentTrack, getCurrentPlayback, getNextTrack, recoverPlaybackOnStartup } from "./playback.ts";
+import {
+  ensureCurrentTrack,
+  getCurrentPlayback,
+  getNextTrack,
+  recordServerAlive,
+  recoverPlaybackOnStartup,
+  removeFinishedTracksOnStartup,
+  SERVER_ALIVE_INTERVAL_MS,
+} from "./playback.ts";
 import { addTrack, InvalidTrackError, listQueue } from "./queue.ts";
 import { broadcastReactionHistory } from "./reactions.ts";
 import { attachRealtime } from "./realtime.ts";
@@ -34,9 +42,8 @@ import {
   joinRoom,
   listPublicLobby,
   RoomClosedError,
-  RoomFullError,
 } from "./rooms.ts";
-import { getDemoSongs, getVideoMetadata, searchVideos } from "./youtube.ts";
+import { getVideoMetadata } from "./youtube.ts";
 
 // Bundled (server/dist/index.js) and unbundled (server/src/index.ts) both
 // sit two levels below the repo root, so this resolves correctly either way.
@@ -54,18 +61,57 @@ const db = openDatabase(databasePath);
 // recover at its last saved position as PAUSED, never extrapolated forward
 // through the unknown downtime. Must run before any socket can connect.
 recoverPlaybackOnStartup(db);
+// Finished tracks leave the queue; clear out any left from before they did.
+removeFinishedTracksOnStartup(db);
+
+// Keeps server_liveness current so the next restart knows how far each
+// playing track had got (see recoverPlaybackOnStartup). Failing to record it
+// only makes that recovery less precise, so it must never take the server
+// down.
+const recordAlive = () => {
+  try {
+    recordServerAlive(db);
+  } catch (err) {
+    console.error("failed to record server liveness:", err);
+  }
+};
+recordAlive();
+setInterval(recordAlive, SERVER_ALIVE_INTERVAL_MS).unref();
 
 const app = express();
 app.use(express.json());
 
 const httpServer = createServer(app);
 const io = new Server(httpServer);
-attachRealtime(io, db);
+const { presence, evictIfClosed } = attachRealtime(io, db);
 
 app.get("/api/health", (_req, res) => {
   const body: HealthResponse = { status: "ok", uptime: process.uptime() };
   res.json(body);
 });
+
+// Every REST call that acts as an account proves it the way a socket does
+// (see realtime.ts's io.use): with the clientId that registered it, which
+// only that browser holds. An accountId alone is no proof — it's public,
+// broadcast to a whole room via presence, queue addedBy and reactions — and
+// trusting one used to let anyone add tracks (becoming DJ) or join rooms as
+// someone else. Responds 401 and returns null when the pair doesn't match.
+function authenticate(req: express.Request, res: express.Response): string | null {
+  const body = req.body as { accountId?: unknown; clientId?: unknown };
+  const accountId = typeof body.accountId === "string" ? body.accountId.trim() : "";
+  const clientId = typeof body.clientId === "string" ? body.clientId : "";
+  if (accountId && clientId && getAccountByClientId(db, clientId)?.accountId === accountId) {
+    return accountId;
+  }
+  res.status(401).json({ error: "accountId and clientId must match a registered account" });
+  return null;
+}
+
+// Display text is bounded so one client can't store (and have broadcast to a
+// whole room) an arbitrarily large name; counted in characters, not bytes.
+const MAX_DISPLAY_NAME_LENGTH = 32;
+const MAX_ROOM_NAME_LENGTH = 60;
+const tooLong = (text: string, max: number) => [...text].length > max;
 
 // Lightweight registration: a browser sends the clientId it persists locally
 // plus a chosen displayName, and gets back its account (creating one on first
@@ -80,28 +126,47 @@ app.post("/api/register", (req, res) => {
     res.status(400).json({ error: "clientId and displayName are required" });
     return;
   }
+  if (tooLong(displayName, MAX_DISPLAY_NAME_LENGTH)) {
+    res.status(400).json({ error: `displayName must be at most ${MAX_DISPLAY_NAME_LENGTH} characters` });
+    return;
+  }
 
   const account: Account = registerAccount(db, clientId, displayName);
   res.json(account);
 });
 
-// Creates a room, owned by an already-registered account. No listing or join
-// endpoint exists yet, so a PRIVATE room's code is only ever handed back here,
-// to its own creator.
+// Picks a returning browser's account back up from the clientId it keeps
+// locally, so a page refresh doesn't ask for a name again (and can go
+// straight back to its room). The clientId is the secret here, exactly as in
+// authenticate above; a browser never seen before gets { account: null }.
+app.post("/api/session", (req, res) => {
+  const body = req.body as { clientId?: unknown };
+  const clientId = typeof body.clientId === "string" ? body.clientId.trim() : "";
+  if (!clientId) {
+    res.status(400).json({ error: "clientId is required" });
+    return;
+  }
+  const account: Account | null = getAccountByClientId(db, clientId) ?? null;
+  res.json({ account });
+});
+
+// Creates a room, owned by the calling account. A PRIVATE room's code is
+// handed back here, to its creator (and later to members, in the room
+// snapshot) — never in the lobby.
 app.post("/api/rooms", (req, res) => {
+  const accountId = authenticate(req, res);
+  if (!accountId) return;
   const body = req.body as Partial<CreateRoomRequest>;
-  const accountId = typeof body.accountId === "string" ? body.accountId.trim() : "";
   const name = typeof body.name === "string" ? body.name.trim() : "";
   const visibility = body.visibility;
   const autoCloseEnabled = typeof body.autoCloseEnabled === "boolean" ? body.autoCloseEnabled : false;
 
-  if (!accountId || !name || (visibility !== "PUBLIC" && visibility !== "PRIVATE")) {
-    res.status(400).json({ error: "accountId, name, and visibility (PUBLIC or PRIVATE) are required" });
+  if (!name || (visibility !== "PUBLIC" && visibility !== "PRIVATE")) {
+    res.status(400).json({ error: "name and visibility (PUBLIC or PRIVATE) are required" });
     return;
   }
-
-  if (!getAccountById(db, accountId)) {
-    res.status(400).json({ error: "unknown accountId" });
+  if (tooLong(name, MAX_ROOM_NAME_LENGTH)) {
+    res.status(400).json({ error: `name must be at most ${MAX_ROOM_NAME_LENGTH} characters` });
     return;
   }
 
@@ -112,62 +177,59 @@ app.post("/api/rooms", (req, res) => {
 // The public lobby only ever lists PUBLIC, open rooms — a PRIVATE room (and
 // its code) never appears here.
 app.get("/api/lobby", (_req, res) => {
-  const rooms: LobbyRoom[] = listPublicLobby(db);
+  const rooms: LobbyRoom[] = listPublicLobby(db, (roomId) => presence.count(roomId));
   res.json(rooms);
 });
 
-function handleJoinError(res: express.Response, err: unknown): void {
-  if (err instanceof RoomClosedError || err instanceof RoomFullError) {
-    res.status(409).json({ error: err.message });
+// Records `accountId` as a member of `room` and reports how many people are
+// in it right now. The capacity check here is only an early answer for the
+// person joining: someone else can still take the last place before their
+// socket arrives, and the socket's room:join is where capacity is actually
+// enforced (server/src/realtime.ts).
+function admit(res: express.Response, room: Room, accountId: string): void {
+  if (!presence.canAdmit(room.roomId, accountId, room.maxUsers)) {
+    res.status(409).json({ error: "that room is full (12 people max)" });
     return;
   }
-  throw err;
+  try {
+    const joined = joinRoom(db, room.roomId, accountId);
+    const result: JoinRoomResult = { room: joined, occupancy: presence.count(room.roomId) };
+    res.json(result);
+  } catch (err) {
+    if (err instanceof RoomClosedError) {
+      res.status(409).json({ error: "that room has closed" });
+      return;
+    }
+    throw err;
+  }
 }
 
 // Joins a PUBLIC room directly by id. A PRIVATE room is reported as
 // not-found here (not 403/409) so probing roomIds can't be used to learn
 // that a private room exists.
 app.post("/api/rooms/:roomId/join", (req, res) => {
-  const { roomId } = req.params;
-  const body = req.body as { accountId?: unknown };
-  const accountId = typeof body.accountId === "string" ? body.accountId.trim() : "";
+  const accountId = authenticate(req, res);
+  if (!accountId) return;
 
-  if (!accountId) {
-    res.status(400).json({ error: "accountId is required" });
-    return;
-  }
-
-  const room = getRoomById(db, roomId);
+  const room = getRoomById(db, req.params.roomId);
   if (!room || room.visibility !== "PUBLIC") {
     res.status(404).json({ error: "room not found" });
     return;
   }
-  if (!getAccountById(db, accountId)) {
-    res.status(400).json({ error: "unknown accountId" });
-    return;
-  }
 
-  try {
-    const result: JoinRoomResult = joinRoom(db, roomId, accountId);
-    res.json(result);
-  } catch (err) {
-    handleJoinError(res, err);
-  }
+  admit(res, room, accountId);
 });
 
 // Joins a PRIVATE (or PUBLIC) room by its 6-digit code — the only way to
 // reach a PRIVATE room, since it never appears in the lobby.
 app.post("/api/rooms/join-by-code", (req, res) => {
-  const body = req.body as { accountId?: unknown; code?: unknown };
-  const accountId = typeof body.accountId === "string" ? body.accountId.trim() : "";
+  const accountId = authenticate(req, res);
+  if (!accountId) return;
+  const body = req.body as { code?: unknown };
   const code = typeof body.code === "string" ? body.code.trim() : "";
 
-  if (!accountId || !/^\d{6}$/.test(code)) {
-    res.status(400).json({ error: "accountId and a 6-digit code are required" });
-    return;
-  }
-  if (!getAccountById(db, accountId)) {
-    res.status(400).json({ error: "unknown accountId" });
+  if (!/^\d{6}$/.test(code)) {
+    res.status(400).json({ error: "a 6-digit code is required" });
     return;
   }
 
@@ -177,12 +239,7 @@ app.post("/api/rooms/join-by-code", (req, res) => {
     return;
   }
 
-  try {
-    const result: JoinRoomResult = joinRoom(db, room.roomId, accountId);
-    res.json(result);
-  } catch (err) {
-    handleJoinError(res, err);
-  }
+  admit(res, room, accountId);
 });
 
 // Lists a room's queue in stable insertion order. queueItemId, not array
@@ -197,24 +254,31 @@ app.get("/api/rooms/:roomId/queue", (req, res) => {
   res.json(queue);
 });
 
-// Adds a track — from a pasted URL, a search result, or a demo song, all
-// treated identically as untrusted input. Never requires a vote.
+// Adds a track from a pasted URL (or bare videoId), always treated as
+// untrusted input. Never requires a vote, but does
+// require being in the (open) room right now: only people listening can add
+// to what everyone hears, and a closed room takes no more changes.
 app.post("/api/rooms/:roomId/queue", async (req, res) => {
+  const accountId = authenticate(req, res);
+  if (!accountId) return;
   const { roomId } = req.params;
-  const body = req.body as { accountId?: unknown; input?: unknown };
-  const accountId = typeof body.accountId === "string" ? body.accountId.trim() : "";
+  const body = req.body as { input?: unknown };
   const input = typeof body.input === "string" ? body.input.trim() : "";
 
-  if (!accountId || !input) {
-    res.status(400).json({ error: "accountId and input are required" });
+  if (!input) {
+    res.status(400).json({ error: "input is required" });
     return;
   }
-  if (!getRoomById(db, roomId)) {
-    res.status(404).json({ error: "room not found" });
+  const room = getRoomById(db, roomId);
+  if (!room || !presence.isPresent(roomId, accountId)) {
+    // Not-present reads as not-found, the same as the socket join, so this
+    // can't be used to learn that a private room exists.
+    res.status(404).json({ error: "room not found — join it before adding tracks" });
     return;
   }
-  if (!getAccountById(db, accountId)) {
-    res.status(400).json({ error: "unknown accountId" });
+  if (room.closed) {
+    evictIfClosed(roomId);
+    res.status(409).json({ error: "that room has closed" });
     return;
   }
 
@@ -241,8 +305,8 @@ app.post("/api/rooms/:roomId/queue", async (req, res) => {
   }
 });
 
-// The current track, current DJ, and next track — a plain display snapshot.
-// No voting or synchronized position/timing is implemented yet.
+// The current track (with its sync anchor), current DJ, and next track — a
+// plain read-only snapshot; the live client gets the same from room:snapshot.
 app.get("/api/rooms/:roomId/playback", (req, res) => {
   const { roomId } = req.params;
   if (!getRoomById(db, roomId)) {
@@ -258,9 +322,8 @@ app.get("/api/rooms/:roomId/playback", (req, res) => {
 
 // One account's server-authoritative reorder-token balance in this room (see
 // CLAUDE.md's Reorder section and shared/src/reorderTokens.ts) — a plain
-// query, never something a client tracks or reports itself. Reordering
-// itself isn't wired up yet; this only exposes the balance so a future
-// REORDER_QUEUE UI can show it.
+// query, never something a client tracks or reports itself; the client
+// fetches it on every (re)join, and reorderTokens:update keeps it current.
 app.get("/api/rooms/:roomId/reorder-tokens/:accountId", (req, res) => {
   const { roomId, accountId } = req.params;
   if (!getRoomById(db, roomId)) {
@@ -275,28 +338,9 @@ app.get("/api/rooms/:roomId/reorder-tokens/:accountId", (req, res) => {
   res.json(balance);
 });
 
-// Search is submit-driven only — the client calls this once per explicit
-// search, never per keystroke (see App.tsx's search form).
-app.get("/api/youtube/search", async (req, res) => {
-  const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
-  if (!q) {
-    res.status(400).json({ error: "q is required" });
-    return;
-  }
-  try {
-    res.json(await searchVideos(q));
-  } catch (err) {
-    handleYoutubeError(res, err);
-  }
-});
-
-app.get("/api/youtube/demo-songs", async (_req, res) => {
-  try {
-    res.json(await getDemoSongs());
-  } catch (err) {
-    handleYoutubeError(res, err);
-  }
-});
+// There is no search: YouTube offers none without the Data API v3, which
+// this course can't use (docs/adr/0003-youtube-metadata-via-oembed.md).
+// Songs come from pasted links.
 
 // Accepts a pasted YouTube URL or a bare videoId, parses it, and looks up
 // its metadata (including whether it's actually embeddable) in one step.
@@ -338,6 +382,12 @@ app.get("/readme/", (_req, res) => {
   </body>
 </html>
 `);
+});
+
+// An /api path no route above matched (a typo, or a removed endpoint such as
+// the old search) answers as an API would, not with the SPA's HTML shell.
+app.use("/api", (_req, res) => {
+  res.status(404).json({ error: "no such API endpoint" });
 });
 
 app.use(express.static(clientDist));

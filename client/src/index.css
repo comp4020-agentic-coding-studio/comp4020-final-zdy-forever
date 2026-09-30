@@ -320,6 +320,60 @@ form {
   align-items: center;
 }
 
+.form--stack {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.form--stack input:not([type="radio"]):not([type="checkbox"]) {
+  width: min(100%, 24rem);
+}
+
+.choice-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1rem;
+  border: none;
+  margin: 0;
+  padding: 0;
+}
+
+.choice-row legend {
+  font-weight: 800;
+  font-size: 0.9rem;
+  margin-bottom: 0.3rem;
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2.75rem;
+  font-weight: 700;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.toggle input {
+  width: 1.3rem;
+  height: 1.3rem;
+  accent-color: var(--candy-purple-dark);
+}
+
+.notice {
+  color: var(--candy-green-dark);
+  font-weight: 700;
+}
+
+.lobby-alert {
+  margin: 0;
+  padding: 0.7rem 1rem;
+  border: var(--border-w) solid var(--candy-red-dark);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--candy-red) 12%, #fff);
+  font-weight: 700;
+}
+
 /* =========================================================== stickers */
 
 .sticker {
@@ -343,6 +397,48 @@ form {
 .sticker--live {
   background: var(--candy-green);
   transform: rotate(3deg);
+}
+
+/* A private room's join code, big enough to read out across a room. */
+.sticker--code {
+  background: var(--candy-yellow);
+  font-size: 1.05rem;
+  letter-spacing: 0.12em;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ============================================================ room bar */
+
+.room-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  background: var(--cream);
+  border: var(--border-w) solid var(--ink);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--card-shadow);
+  padding: 0.6rem 0.9rem;
+}
+
+.room-bar-name {
+  font-family: "Baloo 2", system-ui, sans-serif;
+  font-size: 1.15rem;
+  flex: 1 1 8rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.lobby-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 1rem 0 0.5rem;
+}
+
+.lobby-heading h3 {
+  margin: 0;
+  font-size: 1rem;
 }
 
 /* ================================================================ chips */
@@ -430,6 +526,12 @@ form {
 .queue-item--current {
   background: color-mix(in srgb, var(--candy-yellow) 35%, #fff);
   border-color: var(--candy-orange-dark);
+  cursor: default;
+}
+
+/* A plain list row (lobby rooms, search results) — nothing to drag. */
+.queue-item--static {
+  cursor: default;
 }
 
 .queue-item-title {

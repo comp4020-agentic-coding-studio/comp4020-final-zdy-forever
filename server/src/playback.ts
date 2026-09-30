@@ -15,7 +15,7 @@ interface PlaybackRow {
 }
 
 const QUEUE_ITEM_COLUMNS =
-  "queueItemId, roomId, videoId, title, channelTitle, thumbnailUrl, addedBy, addedAt";
+  "queueItemId, roomId, videoId, title, channelTitle, thumbnailUrl, durationMs, addedBy, addedAt";
 
 const PLAYBACK_ROW_COLUMNS =
   "roomId, playbackId, queueItemId, startedAt, status, anchorPositionMs, anchorServerTimeMs, revision";
@@ -33,8 +33,9 @@ function getPlaybackRow(db: DatabaseSync, roomId: string): PlaybackRow | undefin
 }
 
 function toPlaybackState(db: DatabaseSync, row: PlaybackRow): PlaybackState {
-  // Guaranteed to exist: queue_items rows are append-only (no remove/reorder
-  // implemented yet), and room_playback.queueItemId has a foreign key into it.
+  // Guaranteed to exist: room_playback.queueItemId has a foreign key into
+  // queue_items, and the current item can never be removed (see
+  // queue.ts's removeQueueItem).
   const item = getQueueItemById(db, row.queueItemId) as QueueItem;
   const djAccount = getAccountById(db, item.addedBy);
 
@@ -45,6 +46,7 @@ function toPlaybackState(db: DatabaseSync, row: PlaybackRow): PlaybackState {
     title: item.title,
     channelTitle: item.channelTitle,
     thumbnailUrl: item.thumbnailUrl,
+    durationMs: item.durationMs,
     startedAt: row.startedAt,
     status: row.status,
     anchorPositionMs: row.anchorPositionMs,
@@ -143,31 +145,66 @@ export function ensureCurrentTrack(db: DatabaseSync, roomId: string, queueItemId
 // transition), since it identifies the room's control-state timeline as a
 // whole, not any one track. If there is no next item, playback stops
 // (nothing currently playing) rather than wrapping back around.
+//
+// The track that just finished (played to its end, or skipped) leaves the
+// queue as part of the same transaction: the queue only ever holds what's
+// playing and what's still to come. That changes queue membership, so
+// queueRevision advances too. The caller tells clients (queue:itemRemoved).
 export function advanceToNextTrack(db: DatabaseSync, roomId: string): PlaybackState | null {
+  const finished = getPlaybackRow(db, roomId);
   const next = getNextTrack(db, roomId);
-  if (!next) {
-    db.prepare("DELETE FROM room_playback WHERE roomId = ?").run(roomId);
-    return null;
-  }
-
-  const previousRevision = getPlaybackRow(db, roomId)?.revision ?? 0;
   const nowMs = Date.now();
 
-  db.prepare(
-    `INSERT INTO room_playback
-       (roomId, playbackId, queueItemId, startedAt, status, anchorPositionMs, anchorServerTimeMs, revision)
-     VALUES (?, ?, ?, ?, 'PLAYING', 0, ?, ?)
-     ON CONFLICT(roomId) DO UPDATE SET
-       playbackId = excluded.playbackId,
-       queueItemId = excluded.queueItemId,
-       startedAt = excluded.startedAt,
-       status = excluded.status,
-       anchorPositionMs = excluded.anchorPositionMs,
-       anchorServerTimeMs = excluded.anchorServerTimeMs,
-       revision = excluded.revision`,
-  ).run(roomId, randomUUID(), next.queueItemId, new Date(nowMs).toISOString(), nowMs, previousRevision + 1);
+  db.exec("BEGIN");
+  try {
+    if (next) {
+      db.prepare(
+        `INSERT INTO room_playback
+           (roomId, playbackId, queueItemId, startedAt, status, anchorPositionMs, anchorServerTimeMs, revision)
+         VALUES (?, ?, ?, ?, 'PLAYING', 0, ?, ?)
+         ON CONFLICT(roomId) DO UPDATE SET
+           playbackId = excluded.playbackId,
+           queueItemId = excluded.queueItemId,
+           startedAt = excluded.startedAt,
+           status = excluded.status,
+           anchorPositionMs = excluded.anchorPositionMs,
+           anchorServerTimeMs = excluded.anchorServerTimeMs,
+           revision = excluded.revision`,
+      ).run(roomId, randomUUID(), next.queueItemId, new Date(nowMs).toISOString(), nowMs, (finished?.revision ?? 0) + 1);
+    } else {
+      db.prepare("DELETE FROM room_playback WHERE roomId = ?").run(roomId);
+    }
+    if (finished) {
+      db.prepare("DELETE FROM queue_items WHERE queueItemId = ?").run(finished.queueItemId);
+      db.prepare("UPDATE rooms SET queueRevision = queueRevision + 1 WHERE roomId = ?").run(roomId);
+    }
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
 
-  return getCurrentPlayback(db, roomId);
+  return next ? getCurrentPlayback(db, roomId) : null;
+}
+
+// Called once at startup: drops tracks that had already finished before
+// finished tracks started leaving the queue (see advanceToNextTrack) — in a
+// room that's playing, everything ordered before the current track; in one
+// that isn't, everything, since a room with nothing playing only ever
+// starts a newly added track, never one already queued. Idempotent.
+export function removeFinishedTracksOnStartup(db: DatabaseSync): void {
+  db.exec(`
+    DELETE FROM queue_items
+     WHERE roomId NOT IN (SELECT roomId FROM room_playback)
+        OR EXISTS (
+             SELECT 1
+               FROM room_playback p
+               JOIN queue_items cur ON cur.queueItemId = p.queueItemId
+              WHERE p.roomId = queue_items.roomId
+                AND (queue_items.position < cur.position
+                     OR (queue_items.position = cur.position AND queue_items.rowid < cur.rowid))
+           )
+  `);
 }
 
 // Applies a passed PLAY/PAUSE proposal (see ProposalManager in
@@ -227,21 +264,43 @@ export function seekPlayback(db: DatabaseSync, roomId: string, positionMs: numbe
   return getCurrentPlayback(db, roomId);
 }
 
+// How often the running server records that it's alive (see
+// server_liveness in db.ts). A restart recovers a PLAYING track at most this
+// much earlier than where it really was.
+export const SERVER_ALIVE_INTERVAL_MS = 5_000;
+
+export function recordServerAlive(db: DatabaseSync, nowMs: number = Date.now()): void {
+  db.prepare(
+    `INSERT INTO server_liveness (id, lastAliveMs) VALUES (1, ?)
+     ON CONFLICT(id) DO UPDATE SET lastAliveMs = excluded.lastAliveMs`,
+  ).run(nowMs);
+}
+
 // Called once at server startup, before any client can connect: per
 // CLAUDE.md's persistence requirement, "a previously playing track must
 // recover at its last saved position as PAUSED." A room already PAUSED at
 // shutdown is left completely untouched (its anchor already reflects exactly
-// where it was left, and touching it would bump revision for no reason). A
-// room that was PLAYING is flipped to PAUSED without ever extrapolating
-// through the unknown downtime: anchorPositionMs is preserved exactly as
-// last persisted (never advanced by elapsed wall-clock time), and
-// anchorServerTimeMs is updated to "now" purely so a later resume calculates
-// correctly from this moment forward. This is itself a legitimate
-// control-state transition, so revision advances too.
-export function recoverPlaybackOnStartup(db: DatabaseSync): void {
+// where it was left, and touching it would bump revision for no reason).
+//
+// A room that was PLAYING is flipped to PAUSED at the position it had
+// reached by the last moment the server was known to be running
+// (server_liveness), never extrapolated through the unknown downtime after
+// it. Only the anchor used to be kept, and a track's anchor is only moved by
+// a play/pause/seek, so a track nobody touched recovered at 0:00 however far
+// into it the room was. With no liveness record (a database from before it
+// existed) the anchor is all there is. anchorServerTimeMs becomes "now" so a
+// later resume calculates from this moment. This is itself a control-state
+// transition, so revision advances too.
+export function recoverPlaybackOnStartup(db: DatabaseSync, nowMs: number = Date.now()): void {
+  const lastAliveMs =
+    (db.prepare("SELECT lastAliveMs FROM server_liveness WHERE id = 1").get() as { lastAliveMs: number } | undefined)
+      ?.lastAliveMs ?? null;
   db.prepare(
     `UPDATE room_playback
-     SET status = 'PAUSED', anchorServerTimeMs = ?, revision = revision + 1
+     SET status = 'PAUSED',
+         anchorPositionMs = anchorPositionMs + (CASE WHEN ? IS NULL THEN 0 ELSE MAX(0, ? - anchorServerTimeMs) END),
+         anchorServerTimeMs = ?,
+         revision = revision + 1
      WHERE status = 'PLAYING'`,
-  ).run(Date.now());
+  ).run(lastAliveMs, lastAliveMs, nowMs);
 }

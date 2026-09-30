@@ -101,6 +101,13 @@ export function openDatabase(dbPath: string): DatabaseSync {
   if (!existingQueueItemColumns.has("position")) {
     db.exec("ALTER TABLE queue_items ADD COLUMN position INTEGER NOT NULL DEFAULT 0");
   }
+  // durationMs is the track's length as looked up when it was added, or NULL
+  // when unknown — including every item added before this column existed,
+  // for which a reported track end simply can't be checked (see
+  // shared/src/playbackSync.ts's isPlausibleTrackEnd).
+  if (!existingQueueItemColumns.has("durationMs")) {
+    db.exec("ALTER TABLE queue_items ADD COLUMN durationMs INTEGER");
+  }
 
   // The currently-playing queue item, one row per room (no row = nothing
   // currently playing), plus the server-authoritative sync anchor: status,
@@ -193,6 +200,19 @@ export function openDatabase(dbPath: string): DatabaseSync {
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS reactions_room_video ON reactions(roomId, videoId)
+  `);
+
+  // The last moment this server process was known to be running, refreshed
+  // every few seconds (see playback.ts's recordServerAlive). One row at most.
+  // It lets a restart recover a PLAYING track where it had actually got to,
+  // rather than back at its last anchor (for a track nobody ever paused or
+  // sought, the very start). This is process liveness, not network traffic,
+  // and never counts as room activity.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS server_liveness (
+      id          INTEGER PRIMARY KEY CHECK (id = 1),
+      lastAliveMs INTEGER NOT NULL
+    )
   `);
 
   // Append-only structured observability log (see server/src/logging.ts) —

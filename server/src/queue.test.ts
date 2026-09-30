@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { registerAccount } from "./accounts.ts";
 import { createRoom, getRoomById } from "./rooms.ts";
 import { openDatabase } from "./db.ts";
-import { getNextTrack } from "./playback.ts";
+import { advanceToNextTrack, ensureCurrentTrack, getCurrentPlayback, getNextTrack } from "./playback.ts";
 import { addTrack, InvalidTrackError, listQueue, planReorder, previewReorderQueue, reorderQueueItem } from "./queue.ts";
 
 function fakeMetadataFor(catalogue: Record<string, YoutubeVideoMetadata | null>) {
@@ -94,6 +94,20 @@ describe("queue", () => {
     expect(listQueue(db, roomId)).toEqual([item]);
   });
 
+  it("stores the track's length from the server's own lookup, or null when it has none", async () => {
+    const resolveMetadata = fakeMetadataFor({
+      [SONG_A.videoId]: { ...SONG_A, durationMs: 213_000 },
+      [SONG_B.videoId]: SONG_B,
+    });
+
+    const timed = await addTrack(db, roomId, accountId, SONG_A.videoId, { resolveMetadata });
+    const untimed = await addTrack(db, roomId, accountId, SONG_B.videoId, { resolveMetadata });
+
+    expect(timed.durationMs).toBe(213_000);
+    expect(untimed.durationMs).toBeNull();
+    expect(listQueue(db, roomId).map((item) => item.durationMs)).toEqual([213_000, null]);
+  });
+
   // "track add" is meaningful activity (CLAUDE.md's Rooms section) — a room
   // with auto-close enabled must not close while tracks keep getting added.
   it("bumps the room's lastMeaningfulActivityAt on a successful add", async () => {
@@ -123,8 +137,7 @@ describe("queue", () => {
   });
 
   it("ignores client-claimed metadata and stores only the server's own lookup", async () => {
-    // The "input" is a bare videoId — a search result or demo song only ever
-    // hands the client a videoId, and the server independently re-resolves
+    // The "input" is a bare videoId, and the server independently re-resolves
     // title/channelTitle/thumbnail rather than trusting anything else the
     // client might send alongside it.
     const resolveMetadata = fakeMetadataFor({ [SONG_A.videoId]: SONG_A });
@@ -301,9 +314,9 @@ describe("queue", () => {
     });
 
     it("previewReorderQueue matches reorderQueueItem's would-change verdict without mutating anything", () => {
-      expect(previewReorderQueue(db, roomId, c, a)).toBe(true);
-      expect(previewReorderQueue(db, roomId, a, b)).toBe(false); // no-op
-      expect(previewReorderQueue(db, roomId, "does-not-exist", a)).toBe(false);
+      expect(previewReorderQueue(db, roomId, c, a)).toBeNull();
+      expect(previewReorderQueue(db, roomId, a, b)).toBe("no-op");
+      expect(previewReorderQueue(db, roomId, "does-not-exist", a)).toBe("not-found");
 
       // Confirm the preview truly didn't mutate anything.
       expect(listQueue(db, roomId).map((i) => i.queueItemId)).toEqual([a, b, c]);
@@ -315,6 +328,48 @@ describe("queue", () => {
       reorderQueueItem(db, roomId, c, a);
 
       expect(getNextTrack(db, roomId)?.queueItemId).toBe(c);
+    });
+
+    // Regression: the next track is always the first one positioned after
+    // the playing one, so a reorder that touched the playing track, or put
+    // an upcoming track in front of it, silently dropped that track from
+    // what would ever play — while still counting as a successful reorder.
+    describe("while a track is playing", () => {
+      function playedOrder(): string[] {
+        const played = [getCurrentPlayback(db, roomId)!.queueItemId];
+        let next;
+        while ((next = advanceToNextTrack(db, roomId))) played.push(next.queueItemId);
+        return played;
+      }
+
+      beforeEach(() => {
+        ensureCurrentTrack(db, roomId, a); // [a (playing), b, c]
+      });
+
+      it("refuses to move an upcoming track in front of the playing one", () => {
+        expect(previewReorderQueue(db, roomId, b, a)).toBe("not-upcoming");
+        expect(reorderQueueItem(db, roomId, b, a)).toEqual({ reordered: false, reason: "not-upcoming" });
+        expect(playedOrder()).toEqual([a, b, c]);
+      });
+
+      it("refuses to move the playing track itself", () => {
+        expect(reorderQueueItem(db, roomId, a, c)).toEqual({ reordered: false, reason: "not-upcoming" });
+        expect(reorderQueueItem(db, roomId, a, null)).toEqual({ reordered: false, reason: "not-upcoming" });
+        expect(playedOrder()).toEqual([a, b, c]);
+      });
+
+      it("has nothing left of a finished track to move: it's gone from the queue", () => {
+        advanceToNextTrack(db, roomId); // a finished: [b (playing), c]
+        expect(listQueue(db, roomId).map((i) => i.queueItemId)).toEqual([b, c]);
+        expect(reorderQueueItem(db, roomId, a, null)).toEqual({ reordered: false, reason: "not-found" });
+      });
+
+      it("reorders freely among the tracks still to come, and they then play in that order", () => {
+        const result = reorderQueueItem(db, roomId, c, b);
+        expect(result.reordered).toBe(true);
+        expect(listQueue(db, roomId).map((i) => i.queueItemId)).toEqual([a, c, b]);
+        expect(playedOrder()).toEqual([a, c, b]);
+      });
     });
   });
 });

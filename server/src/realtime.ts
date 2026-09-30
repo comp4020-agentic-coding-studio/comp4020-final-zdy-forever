@@ -11,7 +11,17 @@ import { ProposalManager } from "./proposals.ts";
 import { listQueue } from "./queue.ts";
 import { isReactionEmoji, listReactionsForVideo, recordReaction } from "./reactions.ts";
 import { ReactionRateLimiter } from "./reactionRateLimiter.ts";
-import { joinRoom, RoomClosedError, RoomFullError, RoomNotFoundError } from "./rooms.ts";
+import { getRoomById, isRoomMember, joinRoom } from "./rooms.ts";
+
+type JoinErrorReason = "room-not-found" | "room-closed" | "room-full";
+
+const ROOM_CLOSED_MESSAGE = "that room has closed";
+
+const JOIN_ERROR_MESSAGES: Record<JoinErrorReason, string> = {
+  "room-not-found": "that room doesn't exist",
+  "room-closed": ROOM_CLOSED_MESSAGE,
+  "room-full": "that room is full (12 people max)",
+};
 
 interface SocketData {
   accountId: string;
@@ -25,7 +35,15 @@ export interface AttachRealtimeOptions {
   // the server, never by a client) so integration tests can exercise a full
   // propose→vote→resolve cycle without a real 15-second wait.
   votingWindowMs?: number;
+  // How often occupied rooms are checked for having auto-closed (see
+  // evictIfClosed); 0 turns the periodic check off. Test-only seam.
+  closureCheckIntervalMs?: number;
 }
+
+// Often enough that nobody sits in a room for long after it has closed; the
+// check itself is a timestamp comparison per occupied room (rooms.ts), never
+// counted as activity.
+const CLOSURE_CHECK_INTERVAL_MS = 60_000;
 
 export interface RealtimeHandles {
   presence: PresenceStore;
@@ -33,6 +51,28 @@ export interface RealtimeHandles {
   // resolution timers before closing its scratch database — production code
   // (index.ts) has no need to touch this directly.
   proposals: ProposalManager;
+  // Runs the periodic closure check once, now. Exposed for tests.
+  checkClosedRooms: () => void;
+  // Lets everyone go from a room found closed (see evictIfClosed below) —
+  // for a REST handler that notices the closure first.
+  evictIfClosed: (roomId: string) => boolean;
+}
+
+// Wraps one socket event handler so an unexpected error (a DB write failure,
+// a full disk, ...) fails only that event — reported back to this socket via
+// `reportError` when the event has an error channel — and never the whole
+// process. socket.io invokes handlers from a process.nextTick callback, so an
+// uncaught throw there is an uncaught exception that takes down every room
+// (CLAUDE.md's Reliability section).
+function guarded<P>(event: string, reportError: ((error: string) => void) | null, handler: (payload: P) => void) {
+  return (payload: P) => {
+    try {
+      handler(payload);
+    } catch (err) {
+      console.error(`unexpected error handling ${event}:`, err);
+      reportError?.("internal server error");
+    }
+  };
 }
 
 // Wires Socket.IO into the app: identifies each connection against an
@@ -57,7 +97,14 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
     // clientId is looked up server-side rather than trusting the paired
     // accountId at face value — a socket can only identify as the account
     // that clientId actually registered.
-    const account = getAccountByClientId(db, clientId);
+    let account;
+    try {
+      account = getAccountByClientId(db, clientId);
+    } catch (err) {
+      console.error("unexpected error authenticating a socket:", err);
+      next(new Error("internal server error"));
+      return;
+    }
     if (!account || account.accountId !== accountId) {
       next(new Error("accountId does not match a registered account for this clientId"));
       return;
@@ -82,10 +129,43 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
     }
   }
 
+  // A room auto-closes once 2 hours pass with no meaningful activity,
+  // decided from its stored timestamp whenever something reads it (see
+  // rooms.ts's sweep). People can still be in it then — just listening isn't
+  // activity — and they used to stay, still voting and reacting in a room
+  // that no longer existed for anyone else. So once it's found closed,
+  // everyone in it is told (room:closed) and let go, and any open vote fails.
+  // True if the room is closed (everyone now evicted), false if still open.
+  function evictIfClosed(roomId: string): boolean {
+    const room = getRoomById(db, roomId);
+    if (room && !room.closed) return false;
+
+    proposals.closeRoom(io, roomId);
+    io.to(roomId).emit("room:closed", { roomId });
+    for (const socketId of presence.socketIdsIn(roomId)) {
+      const socket = io.sockets.sockets.get(socketId);
+      if (socket) leaveCurrentRoom(io, socket, socket.data as SocketData);
+    }
+    return true;
+  }
+
+  // Catches the room nobody touches — a closed room with nobody acting in it
+  // would otherwise only be noticed on its members' next action.
+  const checkClosedRooms = () => {
+    for (const roomId of presence.roomIds()) evictIfClosed(roomId);
+  };
+  const closureCheckMs = options.closureCheckIntervalMs ?? CLOSURE_CHECK_INTERVAL_MS;
+  if (closureCheckMs > 0) {
+    const timer = setInterval(guarded("closure check", null, checkClosedRooms), closureCheckMs);
+    timer.unref();
+    io.httpServer?.once("close", () => clearInterval(timer));
+  }
+
   io.on("connection", (socket: Socket) => {
     const data = socket.data as SocketData;
+    const reportTo = (event: string) => (error: string) => socket.emit(event, { error });
 
-    socket.on("room:join", (payload: Partial<RoomJoinPayload>) => {
+    socket.on("room:join", guarded("room:join", reportTo("room:joinError"), (payload: Partial<RoomJoinPayload>) => {
       const roomId = typeof payload?.roomId === "string" ? payload.roomId : "";
       if (!roomId) {
         socket.emit("room:joinError", { error: "roomId is required" });
@@ -96,19 +176,36 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
         leaveCurrentRoom(io, socket, data);
       }
 
-      let room;
-      try {
-        room = joinRoom(db, roomId, data.accountId).room;
-      } catch (err) {
-        if (err instanceof RoomNotFoundError || err instanceof RoomClosedError || err instanceof RoomFullError) {
-          const reason =
-            err instanceof RoomNotFoundError ? "room-not-found" : err instanceof RoomClosedError ? "room-closed" : "room-full";
-          logAction(db, { action: "ROOM_JOIN", result: reason, roomId, accountId: data.accountId });
-          socket.emit("room:joinError", { error: err.message });
-          return;
-        }
-        throw err;
+      // A PRIVATE room only admits an account already recorded as its member
+      // (its creator, or someone who joined with its code via POST
+      // /api/rooms/join-by-code); anyone else gets the same answer as for a
+      // room that doesn't exist, so a bare roomId can't get in or even
+      // confirm the room is there. Capacity is live presence, deduplicated
+      // across one account's tabs. Every check here and presence.join below
+      // run in one synchronous turn with no await, so two sockets racing for
+      // the last place can never both get it.
+      const found = getRoomById(db, roomId);
+      const reason: JoinErrorReason | null =
+        !found || (found.visibility === "PRIVATE" && !isRoomMember(db, roomId, data.accountId))
+          ? "room-not-found"
+          : found.closed
+            ? "room-closed"
+            : !presence.canAdmit(roomId, data.accountId, found.maxUsers)
+              ? "room-full"
+              : null;
+      if (reason) {
+        logAction(db, { action: "ROOM_JOIN", result: reason, roomId, accountId: data.accountId });
+        socket.emit("room:joinError", { error: JOIN_ERROR_MESSAGES[reason], code: reason });
+        return;
       }
+      const room = joinRoom(db, roomId, data.accountId);
+
+      // Every DB read the snapshot needs happens before this socket is
+      // registered anywhere in memory, so a failure up to this point (see
+      // guarded) leaves it not half-joined: never present without a snapshot.
+      const playback = getCurrentPlayback(db, roomId);
+      const queue = listQueue(db, roomId);
+      const reactionHistory = playback ? listReactionsForVideo(db, roomId, playback.videoId) : [];
 
       socket.join(roomId);
       data.roomId = roomId;
@@ -123,21 +220,20 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
       // join, not only a true post-disconnect reconnect.
       logAction(db, { action: returning ? "RECONNECT" : "ROOM_JOIN", result: "ok", roomId, accountId: data.accountId });
 
-      const playback = getCurrentPlayback(db, roomId);
       const snapshot: RoomSnapshot = {
         room,
-        queue: listQueue(db, roomId),
+        queue,
         presence: presence.list(roomId),
         activeProposal: proposals.getActiveProposal(roomId),
         playback,
-        reactionHistory: playback ? listReactionsForVideo(db, roomId, playback.videoId) : [],
+        reactionHistory,
       };
       socket.emit("room:snapshot", snapshot);
 
       if (becamePresent) {
         socket.to(roomId).emit("presence:join", { accountId: data.accountId, displayName: data.displayName });
       }
-    });
+    }));
 
     // Requests a PLAY, PAUSE, SKIP, SEEK, REMOVE_QUEUE_ITEM or REORDER_QUEUE
     // proposal — the client never sets playback status or mutates the queue
@@ -148,9 +244,18 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
     // the vote server-side.
     socket.on(
       "proposal:request",
-      (payload: { type?: unknown; positionMs?: unknown; queueItemId?: unknown; beforeQueueItemId?: unknown }) => {
+      guarded("proposal:request", reportTo("proposal:requestError"), (payload: {
+        type?: unknown;
+        positionMs?: unknown;
+        queueItemId?: unknown;
+        beforeQueueItemId?: unknown;
+      }) => {
         if (!data.roomId) {
           socket.emit("proposal:requestError", { error: "join a room before requesting a vote" });
+          return;
+        }
+        if (evictIfClosed(data.roomId)) {
+          socket.emit("proposal:requestError", { error: ROOM_CLOSED_MESSAGE });
           return;
         }
         const type = payload?.type;
@@ -182,16 +287,21 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
           positionMs,
           queueItemId,
           beforeQueueItemId,
+          presentCount: presence.count(data.roomId),
         });
         if (!result.ok) {
           socket.emit("proposal:requestError", { error: result.error, code: result.code });
         }
-      },
+      }),
     );
 
-    socket.on("proposal:vote", (payload: { proposalId?: unknown; choice?: unknown }) => {
+    socket.on("proposal:vote", guarded("proposal:vote", reportTo("proposal:voteError"), (payload: { proposalId?: unknown; choice?: unknown }) => {
       if (!data.roomId) {
         socket.emit("proposal:voteError", { error: "join a room before voting" });
+        return;
+      }
+      if (evictIfClosed(data.roomId)) {
+        socket.emit("proposal:voteError", { error: ROOM_CLOSED_MESSAGE });
         return;
       }
       const proposalId = typeof payload?.proposalId === "string" ? payload.proposalId : "";
@@ -204,7 +314,7 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
       if (!result.ok) {
         socket.emit("proposal:voteError", { error: result.error });
       }
-    });
+    }));
 
     // A client reports its own player naturally reaching the end of a track
     // — never something the server polls for, since the server has no
@@ -213,21 +323,28 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
     // happens (see ProposalManager.handleTrackEnded), so a stale report from
     // a client that's fallen behind (or several clients all reporting the
     // same real end) can never double-advance or affect the wrong track.
-    socket.on("playback:ended", (payload: { playbackId?: unknown }) => {
-      if (!data.roomId) return;
+    socket.on("playback:ended", guarded("playback:ended", null, (payload: { playbackId?: unknown }) => {
+      if (!data.roomId || evictIfClosed(data.roomId)) return;
       const playbackId = typeof payload?.playbackId === "string" ? payload.playbackId : "";
       if (!playbackId) return;
-      proposals.handleTrackEnded(io, db, data.roomId, playbackId);
-    });
+      proposals.handleTrackEnded(io, db, data.roomId, playbackId, {
+        accountId: data.accountId,
+        presentCount: presence.count(data.roomId),
+      });
+    }));
 
     // Reactions never require voting (CLAUDE.md's Reactions/Voting
     // sections) — the only gates are room membership, a valid emoji from
     // the fixed set, an actually-playing track, and the rate limiter.
     // positionMs is always server-computed here, never a client-claimed
     // value (CLAUDE.md's Authority section).
-    socket.on("reaction:send", (payload: { reaction?: unknown }) => {
+    socket.on("reaction:send", guarded("reaction:send", reportTo("reaction:sendError"), (payload: { reaction?: unknown }) => {
       if (!data.roomId) {
         socket.emit("reaction:sendError", { error: "join a room before reacting" });
+        return;
+      }
+      if (evictIfClosed(data.roomId)) {
+        socket.emit("reaction:sendError", { error: ROOM_CLOSED_MESSAGE });
         return;
       }
       if (!isReactionEmoji(payload?.reaction)) {
@@ -264,16 +381,16 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
         accountId: data.accountId,
         playbackId: playback.playbackId,
       });
-    });
+    }));
 
-    socket.on("disconnect", () => {
+    socket.on("disconnect", guarded("disconnect", null, () => {
       // A participant disconnecting mid-vote is not special-cased: they
       // simply stop being reachable for future ballots, exactly like anyone
       // who never voted at all — their vote remains an ABSTAIN and the
       // proposal still resolves on schedule from whoever did vote.
       leaveCurrentRoom(io, socket, data);
-    });
+    }));
   });
 
-  return { presence, proposals };
+  return { presence, proposals, checkClosedRooms, evictIfClosed };
 }

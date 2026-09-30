@@ -12,6 +12,10 @@ export default defineConfig({
     proxy: {
       "/api": `http://localhost:${backendPort}`,
       "/readme": `http://localhost:${backendPort}`,
+      // The client's socket connects to its own origin (io() in
+      // usePlaybackSync.ts), so in dev that's Vite — forward it, WebSocket
+      // upgrade included, or joining a room never gets past "connecting…".
+      "/socket.io": { target: `http://localhost:${backendPort}`, ws: true },
     },
   },
 });

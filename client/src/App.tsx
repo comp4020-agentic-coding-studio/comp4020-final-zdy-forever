@@ -1,16 +1,42 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   REACTION_EMOJIS,
   type Account,
   type HealthResponse,
-  type YoutubeSearchResult,
+  type JoinRoomResult,
+  type LobbyRoom,
+  type QueueItem,
+  type Room,
   type YoutubeVideoMetadata,
 } from "../../shared/src/types.ts";
 import { getClientId } from "./clientId.ts";
+import { loadRoomId, saveRoomId } from "./roomSession.ts";
 import { usePlaybackSync } from "./usePlaybackSync.ts";
 import { YoutubePlayer, type YoutubePlayerHandle } from "./YoutubePlayer.tsx";
 
 type HealthState = HealthResponse | "error" | null;
+
+type PostResult<T> = { ok: true; data: T } | { ok: false; error: string };
+
+// POSTs JSON and hands back either the parsed body or the server's own
+// { error } message, so every form below can show why something failed.
+async function postJson<T>(url: string, body: unknown): Promise<PostResult<T>> {
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data: unknown = await res.json().catch(() => null);
+    if (!res.ok) {
+      const error = data && typeof (data as { error?: unknown }).error === "string" ? (data as { error: string }).error : null;
+      return { ok: false, error: error ?? `request failed (${res.status})` };
+    }
+    return { ok: true, data: data as T };
+  } catch {
+    return { ok: false, error: "couldn't reach the server" };
+  }
+}
 
 function App() {
   const [health, setHealth] = useState<HealthState>(null);
@@ -19,13 +45,18 @@ function App() {
 
   const [videoId, setVideoId] = useState<string | null>(null);
 
-  const [query, setQuery] = useState("");
-  const [searchResults, setSearchResults] = useState<YoutubeSearchResult[] | "error" | null>(null);
-  const [demoSongs, setDemoSongs] = useState<YoutubeSearchResult[] | "error" | null>(null);
   const [urlInput, setUrlInput] = useState("");
   const [resolveError, setResolveError] = useState<string | null>(null);
+  // Result of the last "add to queue" in a room — the queue itself only ever
+  // changes via the server's queue:itemAdded broadcast.
+  const [addStatus, setAddStatus] = useState<{ ok: boolean; text: string } | null>(null);
 
-  const [roomIdInput, setRoomIdInput] = useState("");
+  const [lobby, setLobby] = useState<LobbyRoom[] | "error" | null>(null);
+  const [newRoomName, setNewRoomName] = useState("");
+  const [newRoomPrivate, setNewRoomPrivate] = useState(false);
+  const [newRoomAutoClose, setNewRoomAutoClose] = useState(true);
+  const [codeInput, setCodeInput] = useState("");
+  const [roomActionError, setRoomActionError] = useState<string | null>(null);
   const [liveRoomId, setLiveRoomId] = useState<string | null>(null);
   const [seekSecondsInput, setSeekSecondsInput] = useState("");
   const playerRef = useRef<YoutubePlayerHandle | null>(null);
@@ -38,19 +69,16 @@ function App() {
 
   const accountId = account && account !== "error" ? account.accountId : null;
   const live = usePlaybackSync(liveRoomId, accountId, getClientId(), playerRef);
+  // Index of the first track still to come: right after the playing one, or
+  // the whole queue when nothing is playing (mirrors server/src/queue.ts's
+  // upcomingOf).
+  const firstUpcomingIndex = live.queue.findIndex((q) => q.queueItemId === live.playback?.queueItemId) + 1;
 
   useEffect(() => {
     fetch("/api/health")
       .then((res) => res.json() as Promise<HealthResponse>)
       .then(setHealth)
       .catch(() => setHealth("error"));
-  }, []);
-
-  useEffect(() => {
-    fetch("/api/youtube/demo-songs")
-      .then((res) => res.json() as Promise<YoutubeSearchResult[]>)
-      .then(setDemoSongs)
-      .catch(() => setDemoSongs("error"));
   }, []);
 
   const register = async (e: React.FormEvent) => {
@@ -65,20 +93,6 @@ function App() {
       setAccount((await res.json()) as Account);
     } catch {
       setAccount("error");
-    }
-  };
-
-  // Submitted explicitly, never fired per keystroke.
-  const search = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const q = query.trim();
-    if (!q) return;
-    try {
-      const res = await fetch(`/api/youtube/search?q=${encodeURIComponent(q)}`);
-      if (!res.ok) throw new Error(await res.text());
-      setSearchResults((await res.json()) as YoutubeSearchResult[]);
-    } catch {
-      setSearchResults("error");
     }
   };
 
@@ -107,14 +121,126 @@ function App() {
     }
   };
 
-  // Joining is just handing the roomId to usePlaybackSync — it's the socket
-  // itself (via room:join) that actually validates/enters the room, so there
-  // is nothing to await here.
-  const joinLiveRoom = (e: React.FormEvent) => {
+  const refreshLobby = useCallback(() => {
+    fetch("/api/lobby")
+      .then((res) => (res.ok ? (res.json() as Promise<LobbyRoom[]>) : Promise.reject()))
+      .then(setLobby)
+      .catch(() => setLobby("error"));
+  }, []);
+
+  // Fresh on first load and every time someone leaves a room back to here.
+  useEffect(() => {
+    if (!liveRoomId) refreshLobby();
+  }, [liveRoomId, refreshLobby]);
+
+  // Every REST call made as this account carries its clientId too — the
+  // server checks the pair, since an accountId alone is public.
+  const credentials = () => ({ accountId, clientId: getClientId() });
+
+  // Handing the roomId to usePlaybackSync is what actually enters the room:
+  // its socket's room:join is where the server enforces capacity and sends
+  // the authoritative snapshot. The REST calls before this only admit the
+  // account (and check a private room's code).
+  const enterRoom = (roomId: string) => {
+    setVideoId(null);
+    setRoomActionError(null);
+    setAddStatus(null);
+    saveRoomId(roomId);
+    setLiveRoomId(roomId);
+  };
+
+  const leaveRoom = () => {
+    saveRoomId(null);
+    setLiveRoomId(null);
+    setAddStatus(null);
+  };
+
+  // A refresh used to lose everything: the name had to be typed again, and a
+  // private room's code too. This browser's clientId (kept in localStorage)
+  // already identifies its account, so pick that back up, then go back to
+  // the room this tab was in — a private room's membership is on the server,
+  // so no code is needed. If the room can't be re-entered any more (closed,
+  // full), the join error below brings the tab back to the lobby.
+  useEffect(() => {
+    let cancelled = false;
+    void postJson<{ account: Account | null }>("/api/session", { clientId: getClientId() }).then((result) => {
+      if (cancelled || !result.ok || !result.data.account) return;
+      setAccount(result.data.account);
+      const roomId = loadRoomId();
+      if (roomId) enterRoom(roomId);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // Runs once, on load; enterRoom only calls state setters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Not being in the room any more — the socket join refused (room full,
+  // closed, gone) or the room closed under us — means back to the lobby,
+  // with the reason, rather than a room view that can't do anything.
+  useEffect(() => {
+    if (liveRoomId && live.joinError) {
+      leaveRoom();
+      setRoomActionError(live.joinError);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveRoomId, live.joinError]);
+
+  const createRoom = async (e: React.FormEvent) => {
     e.preventDefault();
-    const id = roomIdInput.trim();
-    if (!id) return;
-    setLiveRoomId(id);
+    if (!accountId) return;
+    const result = await postJson<Room>("/api/rooms", {
+      ...credentials(),
+      name: newRoomName,
+      visibility: newRoomPrivate ? "PRIVATE" : "PUBLIC",
+      autoCloseEnabled: newRoomAutoClose,
+    });
+    if (!result.ok) {
+      setRoomActionError(result.error);
+      return;
+    }
+    setNewRoomName("");
+    enterRoom(result.data.roomId);
+  };
+
+  const joinPublicRoom = async (roomId: string) => {
+    const result = await postJson<JoinRoomResult>(`/api/rooms/${encodeURIComponent(roomId)}/join`, credentials());
+    if (!result.ok) {
+      setRoomActionError(result.error);
+      refreshLobby();
+      return;
+    }
+    enterRoom(result.data.room.roomId);
+  };
+
+  const joinByCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const result = await postJson<JoinRoomResult>("/api/rooms/join-by-code", { ...credentials(), code: codeInput });
+    if (!result.ok) {
+      setRoomActionError(result.error);
+      return;
+    }
+    setCodeInput("");
+    enterRoom(result.data.room.roomId);
+  };
+
+  // `input` is a pasted link (or a bare videoId) — the
+  // server parses and looks it up itself either way.
+  const addToQueue = async (input: string): Promise<boolean> => {
+    if (!liveRoomId) return false;
+    setAddStatus(null);
+    const result = await postJson<QueueItem>(`/api/rooms/${encodeURIComponent(liveRoomId)}/queue`, {
+      ...credentials(),
+      input,
+    });
+    setAddStatus(result.ok ? { ok: true, text: `added “${result.data.title}” to the queue` } : { ok: false, text: result.error });
+    return result.ok;
+  };
+
+  const addLinkToQueue = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (await addToQueue(urlInput)) setUrlInput("");
   };
 
   // Always visible regardless of room state (CLAUDE.md: keep the YouTube
@@ -127,6 +253,7 @@ function App() {
         ref={playerRef}
         videoId={live.playback?.videoId ?? videoId}
         onStateChange={live.handlePlayerStateChange}
+        onReady={live.handlePlayerReady}
       />
       {live.playback && (
         <>
@@ -142,16 +269,22 @@ function App() {
     </div>
   );
 
-  // Pre-room setup: register, add a track, join a room. Not part of the
-  // in-room priority hierarchy, so it's ordered after the room region once
-  // a room is actually live (see the render below).
-  const setupRegion = (
+  // Before a room: pick a name, then start a room, join one by code, or
+  // pick one from the public lobby.
+  const lobbyRegion = (
     <section className="section-stack">
+      {/* At the top, where it's seen: this is also why someone just landed
+          back here (their room closed, or was full). */}
+      {roomActionError && (
+        <p role="alert" className="lobby-alert">
+          {roomActionError}
+        </p>
+      )}
       <div className="card card--accent-purple">
         <h2>🙋 Your name</h2>
         {account && account !== "error" ? (
           <p>
-            signed in as <strong>{account.displayName}</strong> (accountId: {account.accountId})
+            signed in as <strong>{account.displayName}</strong>
           </p>
         ) : (
           <form onSubmit={register}>
@@ -160,19 +293,108 @@ function App() {
               onChange={(e) => setDisplayName(e.target.value)}
               placeholder="display name"
               aria-label="display name"
+              maxLength={32}
               required
             />
             <button type="submit" className="btn btn--purple">
-              Join
+              Let's go
             </button>
             {account === "error" && <p role="alert">registration failed</p>}
           </form>
         )}
       </div>
 
+      <div className="card card--accent-green">
+        <h2>✨ Start a room</h2>
+        <form className="form--stack" onSubmit={createRoom}>
+          <input
+            value={newRoomName}
+            onChange={(e) => setNewRoomName(e.target.value)}
+            placeholder="room name"
+            aria-label="room name"
+            maxLength={60}
+            required
+          />
+          <fieldset className="choice-row">
+            <legend>Who can find it?</legend>
+            <label className="toggle">
+              <input type="radio" name="visibility" checked={!newRoomPrivate} onChange={() => setNewRoomPrivate(false)} />
+              🌍 Public — listed in the lobby
+            </label>
+            <label className="toggle">
+              <input type="radio" name="visibility" checked={newRoomPrivate} onChange={() => setNewRoomPrivate(true)} />
+              🔒 Private — join with a 6-digit code
+            </label>
+          </fieldset>
+          <label className="toggle">
+            <input type="checkbox" checked={newRoomAutoClose} onChange={(e) => setNewRoomAutoClose(e.target.checked)} />
+            ⏲ Close automatically after 2 hours with no activity
+          </label>
+          <button type="submit" className="btn btn--green" disabled={!accountId}>
+            ✨ Create room
+          </button>
+        </form>
+      </div>
+
       <div className="card card--accent-blue">
-        <h2>🔗 Paste a YouTube link</h2>
-        <form onSubmit={resolveUrl}>
+        <h2>🚪 Join a room</h2>
+        <form onSubmit={joinByCode}>
+          <input
+            value={codeInput}
+            onChange={(e) => setCodeInput(e.target.value.replace(/\D/g, ""))}
+            placeholder="6-digit code"
+            aria-label="private room code"
+            inputMode="numeric"
+            pattern="\d{6}"
+            maxLength={6}
+            required
+          />
+          <button type="submit" className="btn btn--purple" disabled={!accountId}>
+            🔑 Join with code
+          </button>
+        </form>
+        <div className="lobby-heading">
+          <h3>Public rooms</h3>
+          <button type="button" className="btn btn--sm" onClick={refreshLobby} aria-label="refresh the public room list">
+            🔄
+          </button>
+        </div>
+        {lobby === "error" && <p role="alert">couldn't load the room list</p>}
+        {Array.isArray(lobby) && lobby.length === 0 && <p>no public rooms yet — start one!</p>}
+        {Array.isArray(lobby) && lobby.length > 0 && (
+          <ul className="queue-list">
+            {lobby.map((room) => (
+              <li key={room.roomId} className="queue-item queue-item--static">
+                <span className="queue-item-title">{room.name}</span>
+                <span className="chip">
+                  👥 {room.occupancy}/{room.capacity}
+                </span>
+                <button
+                  type="button"
+                  className="btn btn--sm btn--green"
+                  disabled={!accountId || !room.joinable}
+                  onClick={() => void joinPublicRoom(room.roomId)}
+                >
+                  {room.joinable ? "Join" : "Full"}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        {!accountId && <p>pick a display name above to start or join a room</p>}
+      </div>
+    </section>
+  );
+
+  // Songs come from pasted links (there's no search — see
+  // docs/adr/0003-youtube-metadata-via-oembed.md). In a room a link is added
+  // to its queue (no vote needed); outside one it's only previewed.
+  const inRoom = liveRoomId !== null;
+  const songSection = (
+    <section className="section-stack">
+      <div className="card card--accent-blue">
+        <h2>🔗 {inRoom ? "Add a YouTube link" : "Preview a YouTube link"}</h2>
+        <form onSubmit={inRoom ? addLinkToQueue : resolveUrl}>
           <input
             value={urlInput}
             onChange={(e) => setUrlInput(e.target.value)}
@@ -180,70 +402,15 @@ function App() {
             aria-label="YouTube link"
           />
           <button type="submit" className="btn btn--blue">
-            Load
+            {inRoom ? "➕ Add to queue" : "▶ Preview"}
           </button>
         </form>
-        {resolveError && <p role="alert">{resolveError}</p>}
-      </div>
-
-      <div className="card card--accent-blue">
-        <h2>🔍 Search YouTube</h2>
-        <form onSubmit={search}>
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="search…"
-            aria-label="search YouTube"
-          />
-          <button type="submit" className="btn btn--blue">
-            Search
-          </button>
-        </form>
-        {searchResults === "error" && <p role="alert">search failed</p>}
-        {Array.isArray(searchResults) && (
-          <ul className="queue-list">
-            {searchResults.map((r) => (
-              <li key={r.videoId} className="queue-item">
-                <button type="button" className="btn btn--sm" onClick={() => setVideoId(r.videoId)}>
-                  {r.title} — {r.channelTitle}
-                </button>
-              </li>
-            ))}
-          </ul>
+        {!inRoom && resolveError && <p role="alert">{resolveError}</p>}
+        {inRoom && addStatus && (
+          <p role={addStatus.ok ? "status" : "alert"} className={addStatus.ok ? "notice" : undefined}>
+            {addStatus.text}
+          </p>
         )}
-      </div>
-
-      <div className="card card--accent-orange">
-        <h2>🎵 Demo songs</h2>
-        {demoSongs === "error" && <p role="alert">demo songs unavailable</p>}
-        {Array.isArray(demoSongs) && (
-          <ul className="queue-list">
-            {demoSongs.map((song) => (
-              <li key={song.videoId} className="queue-item">
-                <button type="button" className="btn btn--sm" onClick={() => setVideoId(song.videoId)}>
-                  {song.title} — {song.channelTitle}
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-
-      <div className="card card--accent-green">
-        <h2>🚪 Join a room</h2>
-        <form onSubmit={joinLiveRoom}>
-          <input
-            value={roomIdInput}
-            onChange={(e) => setRoomIdInput(e.target.value)}
-            placeholder="roomId"
-            aria-label="room ID"
-          />
-          <button type="submit" className="btn btn--green" disabled={!accountId}>
-            Join room
-          </button>
-        </form>
-        {!accountId && <p>register a display name above before joining a room</p>}
-        {live.joinError && <p role="alert">{live.joinError}</p>}
       </div>
     </section>
   );
@@ -257,27 +424,35 @@ function App() {
   // across separate cards instead of one big block.
   const roomRegion = liveRoomId && (
     <section className="section-stack">
-      <div className="chip-row">
+      <div className="room-bar">
         <span className={`status-pill ${live.connected ? "status-pill--ok" : ""}`}>
-          {live.connected ? "🟢 connected" : "connecting…"}
+          {live.connected ? "connected" : "connecting…"}
         </span>
+        {live.room && <strong className="room-bar-name">{live.room.name}</strong>}
+        {live.room?.visibility === "PRIVATE" && live.room.code && (
+          <span className="sticker sticker--code" aria-label={`private room code ${live.room.code}`}>
+            🔒 {live.room.code}
+          </span>
+        )}
+        {live.room && (
+          <span className="chip">
+            👥 {live.presence.length}/{live.room.maxUsers}
+          </span>
+        )}
+        <button type="button" className="btn btn--sm" onClick={leaveRoom}>
+          🚪 Leave
+        </button>
       </div>
-      {live.joinError && <p role="alert">{live.joinError}</p>}
 
       <div className="room-grid">
         <div className="card card--vote card--accent-blue">
           <h2>🗳️ Vote &amp; controls</h2>
-          {!live.playback ? (
-            <p>nothing is currently playing</p>
-          ) : live.activeProposal ? (
+          {live.activeProposal ? (
             (() => {
               const proposal = live.activeProposal!;
               return (
                 <>
-                  <p className="sticker sticker--live">
-                    {proposal.type} ·{" "}
-                    {proposal.state === "OPEN" ? "voting…" : proposal.state === "PASSED" ? "passed" : "failed"}
-                  </p>
+                  <p className="sticker sticker--live">{proposal.type} · voting…</p>
                   <div className="vote-progress">
                     <span className="vote-progress--yes">
                       ✅ YES {Object.values(proposal.votes).filter((v) => v === "YES").length}
@@ -286,7 +461,7 @@ function App() {
                       ❌ NO {Object.values(proposal.votes).filter((v) => v === "NO").length}
                     </span>
                   </div>
-                  {proposal.state === "OPEN" && accountId && !(accountId in proposal.votes) && (
+                  {accountId && !(accountId in proposal.votes) && (
                     <div className="btn-row">
                       <button
                         type="button"
@@ -307,6 +482,8 @@ function App() {
                 </>
               );
             })()
+          ) : !live.playback ? (
+            <p>nothing is currently playing</p>
           ) : (
             <div className="btn-row">
               <button
@@ -352,7 +529,25 @@ function App() {
               )}
             </div>
           )}
-          {live.playback && live.proposalError && <p role="alert">{live.proposalError}</p>}
+          {/* The room — not just this player — is paused (e.g. after a
+              server restart); and alone, there's nobody to vote with. */}
+          {live.playback?.status === "PAUSED" && (
+            <p className="footer-note">⏸ Paused for everyone in the room — propose Play to resume.</p>
+          )}
+          {live.playback && live.presence.length < 2 && (
+            <p className="footer-note">You're the only one here, so your proposals take effect straight away.</p>
+          )}
+          {!live.activeProposal && live.lastProposalResult && (
+            <p className="sticker">
+              last vote: {live.lastProposalResult.proposal.type} ·{" "}
+              {live.lastProposalResult.proposal.state === "FAILED"
+                ? "failed"
+                : live.lastProposalResult.applied
+                  ? "passed"
+                  : "passed, but the room had already moved on"}
+            </p>
+          )}
+          {live.proposalError && <p role="alert">{live.proposalError}</p>}
         </div>
 
         <div className="card card--dj card--accent-purple">
@@ -394,21 +589,31 @@ function App() {
             </div>
           )}
           <ul className="queue-list">
-            {live.queue.map((item, index) => (
+            {live.queue.map((item, index) => {
+              // The queue is the playing track and what's still to come
+              // (finished ones leave it). Only the tracks still to come can
+              // be reordered, and only among themselves — the server rejects
+              // anything else as NOT_UPCOMING.
+              const upcoming = index >= firstUpcomingIndex;
+              const state = upcoming ? "upcoming" : "current";
+              return (
               <li
                 key={item.queueItemId}
-                className={`queue-item ${item.queueItemId === live.playback?.queueItemId ? "queue-item--current" : ""}`}
-                draggable
+                className={`queue-item queue-item--${state}`}
+                draggable={upcoming}
                 onDragStart={() => setDragQueueItemId(item.queueItemId)}
                 onDragEnd={() => setDragQueueItemId(null)}
-                onDragOver={(e) => e.preventDefault()}
+                onDragOver={(e) => {
+                  if (upcoming) e.preventDefault();
+                }}
                 onDrop={(e) => {
                   e.preventDefault();
-                  if (dragQueueItemId) live.requestReorderQueueProposal(dragQueueItemId, item.queueItemId);
+                  if (dragQueueItemId && upcoming) live.requestReorderQueueProposal(dragQueueItemId, item.queueItemId);
                   setDragQueueItemId(null);
                 }}
               >
                 <span className="queue-item-title">
+                  {state === "current" && "▶ "}
                   {item.title} — {item.channelTitle}
                 </span>
                 {/* Mobile-accessible fallback for drag-and-drop: swaps this
@@ -418,7 +623,7 @@ function App() {
                 <button
                   type="button"
                   className="btn btn--sm"
-                  disabled={index === 0}
+                  disabled={!upcoming || index === firstUpcomingIndex}
                   aria-label={`move "${item.title}" up in the queue`}
                   onClick={() =>
                     live.requestReorderQueueProposal(item.queueItemId, live.queue[index - 1].queueItemId)
@@ -429,7 +634,7 @@ function App() {
                 <button
                   type="button"
                   className="btn btn--sm"
-                  disabled={index === live.queue.length - 1}
+                  disabled={!upcoming || index === live.queue.length - 1}
                   aria-label={`move "${item.title}" down in the queue`}
                   onClick={() =>
                     live.requestReorderQueueProposal(
@@ -454,7 +659,8 @@ function App() {
                   </button>
                 )}
               </li>
-            ))}
+              );
+            })}
             {/* Drop target for dragging an item to the very end of the queue
                 — beforeQueueItemId: null means "move to the end." */}
             <li
@@ -523,10 +729,8 @@ function App() {
       </header>
 
       {playerCard}
-      {roomRegion}
-      {setupRegion}
-
-      <p className="footer-note">Echo Room — a shared listening room for up to 12 people.</p>
+      {inRoom ? roomRegion : lobbyRegion}
+      {songSection}
     </main>
   );
 }

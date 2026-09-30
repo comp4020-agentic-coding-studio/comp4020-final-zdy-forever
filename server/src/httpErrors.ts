@@ -1,21 +1,17 @@
 import type { Response } from "express";
-import { YoutubeApiError, YoutubeApiKeyMissingError } from "./youtube.ts";
+import { YoutubeLookupError } from "./youtube.ts";
 
 // Maps an error caught around a YouTube-touching request to the right HTTP
-// response. The two known YouTube-specific error types get their own
-// status/message; anything else — a DB write failure, or any other
-// unanticipated error — gets a generic 500 instead of being rethrown. Every
-// caller of this function is an *async* Express route handler: Express only
-// catches a *synchronous* handler's throw automatically, so rethrowing here
-// would become an unhandled promise rejection that crashes the whole
-// process (every room's live connections, not just this one request) under
-// Node's default --unhandled-rejections=throw behavior.
+// response. A YouTube lookup failure gets its own status/message; anything
+// else — a DB write failure, or any other unanticipated error — gets a
+// generic 500 instead of being rethrown. Every caller of this function is an
+// *async* Express route handler: Express only catches a *synchronous*
+// handler's throw automatically, so rethrowing here would become an
+// unhandled promise rejection that crashes the whole process (every room's
+// live connections, not just this one request) under Node's default
+// --unhandled-rejections=throw behavior.
 export function handleYoutubeError(res: Response, err: unknown): void {
-  if (err instanceof YoutubeApiKeyMissingError) {
-    res.status(503).json({ error: "YouTube API is not configured" });
-    return;
-  }
-  if (err instanceof YoutubeApiError) {
+  if (err instanceof YoutubeLookupError) {
     res.status(502).json({ error: err.message });
     return;
   }

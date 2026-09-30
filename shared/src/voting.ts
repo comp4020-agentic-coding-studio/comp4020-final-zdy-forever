@@ -2,9 +2,9 @@
 // client. This file only models the *voting mechanism itself* — creating a
 // proposal, casting ballots, tallying, and deciding whether one may execute.
 // It knows nothing about Socket.IO, the database, or how a PASSED proposal
-// actually mutates playback/queue state; wiring real PLAY/PAUSE/SKIP/SEEK/
-// REMOVE_QUEUE_ITEM/REORDER_QUEUE side effects to a passed proposal is a
-// later phase (see CLAUDE.md's Voting section for the rules this encodes).
+// actually mutates playback/queue state — server/src/proposals.ts wires real
+// PLAY/PAUSE/SKIP/SEEK/REMOVE_QUEUE_ITEM/REORDER_QUEUE side effects to a
+// passed proposal (see CLAUDE.md's Voting section for the rules this encodes).
 //
 // All timestamps are epoch milliseconds (like playbackSync.ts's
 // anchorServerTimeMs), not ISO strings — every function here does ms
@@ -58,6 +58,15 @@ export interface Proposal {
   reference: ProposalReference;
   state: ProposalState;
   votes: Record<string, VoteChoice>; // accountId -> vote; absent entirely = abstain
+}
+
+// The server's proposal:update payload (see server/src/proposals.ts) —
+// `proposal.state` is the engine's honest verdict (OPEN/PASSED/FAILED), while
+// `applied` says whether a PASSED verdict actually got to mutate playback/
+// queue state (it may not, if the reference went stale before it closed).
+export interface ProposalBroadcast {
+  proposal: Proposal;
+  applied: boolean;
 }
 
 export const VOTING_WINDOW_MS = 15_000;

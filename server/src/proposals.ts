@@ -9,10 +9,12 @@ import {
   resolveProposal,
   VOTING_WINDOW_MS,
   type Proposal,
+  type ProposalBroadcast,
   type ProposalPayload,
   type ProposalReference,
   type VoteChoice,
 } from "../../shared/src/voting.ts";
+import { isPlausibleTrackEnd } from "../../shared/src/playbackSync.ts";
 import { logAction } from "./logging.ts";
 import { advanceToNextTrack, getCurrentPlayback, seekPlayback, setPlaybackStatus } from "./playback.ts";
 import {
@@ -32,15 +34,9 @@ import { touchRoomActivity } from "./rooms.ts";
 // schedules resolution at expiresAt, so the 15-second window is enforced by
 // the server regardless of what any client claims about time.
 //
-// Every broadcast carries { proposal, applied } — `proposal.state` is the
-// pure engine's honest verdict (OPEN/PASSED/FAILED), while `applied` says
-// whether a PASSED verdict actually got to mutate playback/queue state (it
-// may not, if the reference went stale between when the vote opened and when
-// it closed).
-export interface ProposalBroadcast {
-  proposal: Proposal;
-  applied: boolean;
-}
+// Every broadcast carries { proposal, applied } — see ProposalBroadcast in
+// shared/src/voting.ts, where it lives so the client can type it too.
+export type { ProposalBroadcast };
 
 // Machine-readable codes for request-time rejections a client needs to
 // branch on (rather than just display): "only the current DJ may initiate
@@ -48,10 +44,11 @@ export interface ProposalBroadcast {
 // currently-playing queue item (see the "Current-track removal" comment on
 // requestPlaybackProposal below), a REORDER_QUEUE drag that would produce no
 // real change (re-verified right now, before ever opening a vote over it),
-// and a REORDER_QUEUE request from an account with no reorder tokens left —
-// a client is expected to distinguish all of these from an ordinary
-// validation error.
-export type ProposalRequestErrorCode = "NOT_CURRENT_DJ" | "IS_CURRENT_TRACK" | "NO_OP" | "NO_REORDER_TOKENS";
+// one that would move a track that isn't still to come (or in front of the
+// playing one), and a REORDER_QUEUE request from an account with no reorder
+// tokens left — a client is expected to distinguish all of these from an
+// ordinary validation error.
+export type ProposalRequestErrorCode = "NOT_CURRENT_DJ" | "IS_CURRENT_TRACK" | "NO_OP" | "NOT_UPCOMING" | "NO_REORDER_TOKENS";
 
 export type ProposalOutcome =
   | { ok: true; proposal: Proposal }
@@ -69,6 +66,10 @@ interface RequestOptions {
   // REORDER_QUEUE only: the stable id of the item the dragged item should
   // land before, or null to mean "move to the end of the queue."
   beforeQueueItemId?: string | null;
+  // How many accounts are in the room right now, the proposer included (set
+  // by the realtime layer from live presence). See openProposal: with nobody
+  // but the proposer there, the proposal passes at once.
+  presentCount?: number;
 }
 
 // One active proposal per room at a time (CLAUDE.md's Reliability section:
@@ -78,6 +79,11 @@ interface RequestOptions {
 export class ProposalManager {
   private active = new Map<string, Proposal>();
   private timers = new Map<string, NodeJS.Timeout>();
+  // Which accounts have reported the current track of a room ended, for a
+  // track of unknown length (see handleTrackEnded). In-memory only, like the
+  // proposals themselves: after a restart everything recovers PAUSED, so no
+  // pending report could still be meaningful.
+  private endReports = new Map<string, { key: string; accountIds: Set<string> }>();
 
   getActiveProposal(roomId: string): Proposal | null {
     return this.active.get(roomId) ?? null;
@@ -129,18 +135,19 @@ export class ProposalManager {
         return { ok: false, error: "only the current DJ may initiate seek", code: "NOT_CURRENT_DJ" };
       }
       const positionMs = options.positionMs;
-      // Duration isn't tracked anywhere in this codebase yet (the YouTube
-      // metadata lookup never fetches contentDetails.duration), so "target <=
-      // known duration where available" has no known duration to check
-      // against right now — only the lower bound is enforced.
       if (typeof positionMs !== "number" || !Number.isFinite(positionMs) || positionMs < 0) {
         return { ok: false, error: "seek target must be a non-negative number of milliseconds" };
+      }
+      // "target <= known duration where available" — a track added before
+      // durations were recorded (or a live stream) has none to check.
+      if (playback.durationMs !== null && positionMs > playback.durationMs) {
+        return { ok: false, error: "seek target is past the end of the track" };
       }
     }
 
     const payload: ProposalPayload = type === "SEEK" ? { type: "SEEK", positionMs: options.positionMs! } : { type };
     const reference: ProposalReference = { kind: "playback", playbackId: playback.playbackId, revision: playback.revision };
-    return this.openProposal(io, db, roomId, proposerAccountId, payload, reference, options.votingWindowMs);
+    return this.openProposal(io, db, roomId, proposerAccountId, payload, reference, options);
   }
 
   // Current-track removal: REMOVE_QUEUE_ITEM may never target the room's
@@ -192,7 +199,7 @@ export class ProposalManager {
       proposerAccountId,
       { type: "REMOVE_QUEUE_ITEM", queueItemId },
       reference,
-      options.votingWindowMs,
+      options,
     );
   }
 
@@ -202,11 +209,14 @@ export class ProposalManager {
   // reason) on an outcome execution time would reject for free anyway:
   //
   // - previewReorderQueue re-verifies, right now, that this drag would
-  //   actually change the queue order — a drag dropped back onto its
-  //   original position (or its own current successor) is rejected outright
-  //   rather than opening a vote over a proposal that could only ever
-  //   resolve as a no-op (CLAUDE.md: "Failed, stale or no-op reorder
-  //   attempts cost nothing" — cheapest to honor by never starting one).
+  //   actually change the order of the tracks still to come — a drag dropped
+  //   back onto its original position (or its own current successor) is
+  //   rejected as NO_OP, and one touching the playing track, an
+  //   already-played one, or landing in front of the playing track as
+  //   NOT_UPCOMING (it would drop that track from what ever plays), rather
+  //   than opening a vote that could only resolve as a no-op (CLAUDE.md:
+  //   "Failed, stale or no-op reorder attempts cost nothing" — cheapest to
+  //   honor by never starting one).
   // - getReorderTokenBalance rejects a proposer already at 0 tokens. Since
   //   only one proposal can be open per room at a time and the vote window
   //   is at most 15 seconds, and regeneration only ever adds tokens, a
@@ -235,7 +245,15 @@ export class ProposalManager {
       return { ok: false, error: "no such target queue item in this room" };
     }
 
-    if (!previewReorderQueue(db, roomId, queueItemId, beforeQueueItemId)) {
+    const rejection = previewReorderQueue(db, roomId, queueItemId, beforeQueueItemId);
+    if (rejection === "not-upcoming") {
+      return {
+        ok: false,
+        error: "only tracks still to come can be moved, and only among themselves",
+        code: "NOT_UPCOMING",
+      };
+    }
+    if (rejection) {
       return { ok: false, error: "this would not change the queue order", code: "NO_OP" };
     }
 
@@ -252,7 +270,7 @@ export class ProposalManager {
       proposerAccountId,
       { type: "REORDER_QUEUE", queueItemId, beforeQueueItemId },
       reference,
-      options.votingWindowMs,
+      options,
     );
   }
 
@@ -266,7 +284,7 @@ export class ProposalManager {
     proposerAccountId: string,
     payload: ProposalPayload,
     reference: ProposalReference,
-    votingWindowMs: number | undefined,
+    options: RequestOptions,
   ): ProposalOutcome {
     const nowMs = Date.now();
     let proposal = createProposal({
@@ -276,7 +294,7 @@ export class ProposalManager {
       createdAt: nowMs,
       payload,
       reference,
-      votingWindowMs: votingWindowMs ?? VOTING_WINDOW_MS,
+      votingWindowMs: options.votingWindowMs ?? VOTING_WINDOW_MS,
     });
 
     // The proposer implicitly votes YES for the action they just requested —
@@ -286,6 +304,28 @@ export class ProposalManager {
     const proposerVote = engineCastVote(proposal, proposerAccountId, "YES", nowMs);
     if (proposerVote.ok) proposal = proposerVote.proposal;
 
+    // "proposal create" is meaningful activity (CLAUDE.md's Rooms section),
+    // regardless of proposal type. It's the only DB write here, so it goes
+    // first: if it throws, no proposal has been opened, broadcast or timed.
+    touchRoomActivity(db, roomId, nowMs);
+
+    // A sole listener's proposal passes at once (docs/adr/0004): with
+    // nobody else in the room, no vote could ever reach the 2 non-abstain
+    // votes it needs, so a room left with one person — after a server
+    // restart paused it, say — could never be played, skipped or reordered
+    // again. Everything checked before this point still holds (DJ-only Seek,
+    // reorder tokens, ...), and it's applied exactly like a vote that passed.
+    if (options.presentCount === 1) {
+      logAction(
+        db,
+        { action: "PROPOSAL_CREATE", result: "ok", roomId, accountId: proposerAccountId, proposalId: proposal.proposalId, detail: `${payload.type} (sole listener)` },
+        nowMs,
+      );
+      const passed: Proposal = { ...proposal, state: "PASSED" };
+      this.applyPassed(io, db, roomId, passed);
+      return { ok: true, proposal: passed };
+    }
+
     this.active.set(roomId, proposal);
     this.broadcast(io, roomId, proposal, false);
 
@@ -293,9 +333,6 @@ export class ProposalManager {
     timer.unref?.();
     this.timers.set(roomId, timer);
 
-    // "proposal create" is meaningful activity (CLAUDE.md's Rooms section),
-    // regardless of proposal type.
-    touchRoomActivity(db, roomId, nowMs);
     logAction(
       db,
       { action: "PROPOSAL_CREATE", result: "ok", roomId, accountId: proposerAccountId, proposalId: proposal.proposalId, detail: payload.type },
@@ -327,10 +364,11 @@ export class ProposalManager {
       };
     }
 
+    // "vote" is meaningful activity (CLAUDE.md's Rooms section) — written
+    // before the ballot is recorded, so a failed write never half-counts it.
+    touchRoomActivity(db, roomId, nowMs);
     this.active.set(roomId, result.proposal);
     this.broadcast(io, roomId, result.proposal, false);
-    // "vote" is meaningful activity (CLAUDE.md's Rooms section).
-    touchRoomActivity(db, roomId, nowMs);
     logAction(db, { action: "VOTE_CAST", result: "ok", roomId, accountId, proposalId, detail: choice }, nowMs);
     return { ok: true, proposal: result.proposal };
   }
@@ -356,14 +394,65 @@ export class ProposalManager {
   // the track has moved on, that vote can no longer mean anything, and
   // clients should see it end right away rather than have a "voting..." UI
   // linger for up to 15 more seconds after the track it was about has gone.
-  handleTrackEnded(io: Server, db: DatabaseSync, roomId: string, endedPlaybackId: string): void {
+  //
+  // Otherwise any one client could skip the track for everyone with no vote,
+  // just by dragging the visible player's own scrubber to the end. So:
+  //
+  // - With a known length, a report is believed only once the room's own
+  //   anchor says the track can be over (isPlausibleTrackEnd), and the first
+  //   such report advances the room.
+  // - With no known length (a live stream, or a track queued before lengths
+  //   were recorded) there's nothing to check against, so it takes reports
+  //   from a strict majority of the accounts present — the same kind of
+  //   majority a vote needs. Every listener's player reaches the end, so
+  //   this costs a genuine end nothing but the slowest of that majority,
+  //   while one client alone can no longer force it. Reports count per
+  //   (playbackId, revision): a pause or seek re-anchors everyone, so
+  //   earlier reports no longer say anything about where the track is.
+  handleTrackEnded(
+    io: Server,
+    db: DatabaseSync,
+    roomId: string,
+    endedPlaybackId: string,
+    report: { accountId: string; presentCount: number },
+  ): void {
     const current = getCurrentPlayback(db, roomId);
     if (!current || current.playbackId !== endedPlaybackId) {
       return;
     }
+    const rejectedAs = (result: string, detail = "track-ended") =>
+      logAction(db, {
+        action: "PLAYBACK_CHANGE",
+        result,
+        roomId,
+        accountId: report.accountId,
+        playbackId: current.playbackId,
+        revision: current.revision,
+        detail,
+      });
+    if (current.durationMs === null) {
+      const key = `${current.playbackId}:${current.revision}`;
+      let reports = this.endReports.get(roomId);
+      if (!reports || reports.key !== key) {
+        reports = { key, accountIds: new Set() };
+        this.endReports.set(roomId, reports);
+      }
+      reports.accountIds.add(report.accountId);
+      const needed = Math.floor(Math.max(1, report.presentCount) / 2) + 1;
+      if (reports.accountIds.size < needed) {
+        rejectedAs("awaiting-end-reports", `${reports.accountIds.size}/${needed}`);
+        return;
+      }
+    } else if (!isPlausibleTrackEnd(current, Date.now())) {
+      rejectedAs("rejected-early-end");
+      return;
+    }
+    this.endReports.delete(roomId);
     this.invalidateActive(io, roomId);
     const next = advanceToNextTrack(db, roomId);
     io.to(roomId).emit("playback:update", next);
+    // The track that just ended has left the queue (see advanceToNextTrack).
+    io.to(roomId).emit("queue:itemRemoved", { queueItemId: current.queueItemId });
     if (next) broadcastReactionHistory(io, db, roomId, next.videoId);
     logAction(db, {
       action: "PLAYBACK_CHANGE",
@@ -392,6 +481,13 @@ export class ProposalManager {
     this.broadcast(io, roomId, { ...proposal, state: "FAILED" }, false);
   }
 
+  // The room has closed (see realtime.ts): any vote still open there fails
+  // right away instead of resolving into a room nobody is in any more.
+  closeRoom(io: Server, roomId: string): void {
+    this.invalidateActive(io, roomId);
+    this.endReports.delete(roomId);
+  }
+
   // Cancels every pending resolution timer without touching the database or
   // broadcasting anything. Test-only: a test that closes its scratch
   // database while a proposal is still mid-vote must call this first, or the
@@ -400,6 +496,7 @@ export class ProposalManager {
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();
     this.active.clear();
+    this.endReports.clear();
   }
 
   private resolveRoom(io: Server, db: DatabaseSync, roomId: string): void {
@@ -426,6 +523,12 @@ export class ProposalManager {
       return;
     }
 
+    this.applyPassed(io, db, roomId, resolved);
+  }
+
+  // Applies a PASSED proposal — one whose vote passed (resolveRoom), or a
+  // sole listener's (openProposal).
+  private applyPassed(io: Server, db: DatabaseSync, roomId: string, resolved: Proposal): void {
     logAction(db, {
       action: "PROPOSAL_PASS",
       result: "ok",
@@ -479,9 +582,12 @@ export class ProposalManager {
       // advanceToNextTrack returning null just means the queue is now empty
       // (playback stops) — that is a successful skip, not a failure to
       // apply, so applied is unconditionally true once we get this far.
+      // The skipped track leaves the queue, just as a finished one does.
+      const skipped = getCurrentPlayback(db, roomId)?.queueItemId;
       const next = advanceToNextTrack(db, roomId);
       this.broadcast(io, roomId, resolved, true);
       io.to(roomId).emit("playback:update", next);
+      if (skipped) io.to(roomId).emit("queue:itemRemoved", { queueItemId: skipped });
       if (next) broadcastReactionHistory(io, db, roomId, next.videoId);
       // "successful shared playback action" is meaningful activity
       // (CLAUDE.md's Rooms section) — a successful SKIP unconditionally.

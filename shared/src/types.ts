@@ -61,23 +61,25 @@ export interface LobbyRoom {
   joinable: boolean;
 }
 
+// occupancy is how many people are in the room right now (live presence),
+// the same number the 12-user maximum is enforced against.
 export interface JoinRoomResult {
   room: Room;
   occupancy: number;
 }
 
-// Shape returned by both search and the demo-songs list.
-export interface YoutubeSearchResult {
+// What a single-video metadata lookup returns (YouTube's oEmbed endpoint —
+// see server/src/youtube.ts): the video's details, whether it can actually be
+// embedded elsewhere, and its length if known. oEmbed never reports one, so
+// it's null for every newly added track; only items queued back when lengths
+// were looked up still carry one.
+export interface YoutubeVideoMetadata {
   videoId: string;
   title: string;
   channelTitle: string;
   thumbnailUrl: string;
-}
-
-// The fuller record returned by a single-video metadata lookup, which also
-// carries whether the video can actually be embedded elsewhere.
-export interface YoutubeVideoMetadata extends YoutubeSearchResult {
   embeddable: boolean;
+  durationMs?: number | null;
 }
 
 // queueItemId is this item's permanent identity — never its position in the
@@ -90,13 +92,16 @@ export interface QueueItem {
   title: string;
   channelTitle: string;
   thumbnailUrl: string;
+  // The track's length as the server looked it up when it was added, or null
+  // if unknown — which, with lengths no longer available from YouTube (see
+  // YoutubeVideoMetadata), is every newly added track.
+  durationMs: number | null;
   addedBy: string;
   addedAt: string;
 }
 
-// input may be a pasted YouTube URL, a bare videoId from a search result, or
-// a bare videoId from a demo song — the server treats all three identically
-// and re-resolves/re-validates independently either way.
+// input may be a pasted YouTube URL or a bare videoId — the server treats
+// both identically and re-resolves/re-validates independently either way.
 export interface AddTrackRequest {
   accountId: string;
   input: string;
@@ -165,6 +170,9 @@ export interface PlaybackState {
   title: string;
   channelTitle: string;
   thumbnailUrl: string;
+  // Copied from the queue item; what a reported track end is checked
+  // against (see shared/src/playbackSync.ts's isPlausibleTrackEnd).
+  durationMs: number | null;
   startedAt: string;
   status: PlaybackStatus;
   anchorPositionMs: number;
@@ -174,8 +182,7 @@ export interface PlaybackState {
 }
 
 // Handed back by GET .../playback: what's playing now (or null if nothing
-// is), and what would play next. Both are purely a display concern at this
-// stage — no voting or synchronized position/timing is implemented yet.
+// is), and what would play next — a read-only display snapshot.
 export interface RoomPlaybackSnapshot {
   current: PlaybackState | null;
   next: QueueItem | null;

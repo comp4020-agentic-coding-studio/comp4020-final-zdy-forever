@@ -6,10 +6,9 @@
 // whole engine stays a pure state machine and is trivially testable without
 // fake timers — a test just picks whatever nowMs it wants.
 //
-// Drag-and-drop reordering itself and REORDER_QUEUE voting are a later phase
-// (see CLAUDE.md) — this module only models "does this account currently
-// have a token, and when does its next one arrive," independent of how a
-// token ever gets spent.
+// This module only models "does this account currently have a token, and
+// when does its next one arrive," independent of how a token gets spent (a
+// passed REORDER_QUEUE vote — see server/src/proposals.ts).
 
 export const MAX_REORDER_TOKENS = 5;
 
