@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { getAccountByClientId, registerAccount } from "./accounts.ts";
+import { getAccountByClientId, registerAccount, renameAccount } from "./accounts.ts";
 import { openDatabase } from "./db.ts";
 
 describe("accounts", () => {
@@ -74,5 +74,19 @@ describe("accounts", () => {
     reopened.close();
 
     expect(found?.displayName).toBe("Alex");
+  });
+
+  it("renames an account in place: same accountId, new displayName, and re-registering keeps the new name", () => {
+    const original = registerAccount(db, "client-a", "Alex");
+
+    const renamed = renameAccount(db, original.accountId, "Alexandra");
+
+    expect(renamed).toEqual({ ...original, displayName: "Alexandra" });
+    expect(getAccountByClientId(db, "client-a")?.displayName).toBe("Alexandra");
+    expect(registerAccount(db, "client-a", "Alex")).toEqual(renamed);
+  });
+
+  it("renames nothing for an unknown account", () => {
+    expect(renameAccount(db, "no-such-account", "Nobody")).toBeUndefined();
   });
 });

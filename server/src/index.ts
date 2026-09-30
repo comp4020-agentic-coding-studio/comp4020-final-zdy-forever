@@ -16,10 +16,8 @@ import type {
   ReorderTokenBalance,
   Room,
   RoomPlaybackSnapshot,
-  YoutubeVideoMetadata,
 } from "../../shared/src/types.ts";
-import { parseYouTubeVideoId } from "../../shared/src/youtube.ts";
-import { getAccountByClientId, getAccountById, registerAccount } from "./accounts.ts";
+import { getAccountByClientId, getAccountById, registerAccount, renameAccount } from "./accounts.ts";
 import { openDatabase } from "./db.ts";
 import { handleYoutubeError } from "./httpErrors.ts";
 import {
@@ -43,7 +41,6 @@ import {
   listPublicLobby,
   RoomClosedError,
 } from "./rooms.ts";
-import { getVideoMetadata } from "./youtube.ts";
 
 // Bundled (server/dist/index.js) and unbundled (server/src/index.ts) both
 // sit two levels below the repo root, so this resolves correctly either way.
@@ -132,6 +129,25 @@ app.post("/api/register", (req, res) => {
   }
 
   const account: Account = registerAccount(db, clientId, displayName);
+  res.json(account);
+});
+
+// Renames the calling account (proved by its clientId, like every other call
+// that acts as one). The same length limit as registering applies.
+app.post("/api/account/name", (req, res) => {
+  const accountId = authenticate(req, res);
+  if (!accountId) return;
+  const body = req.body as { displayName?: unknown };
+  const displayName = typeof body.displayName === "string" ? body.displayName.trim() : "";
+  if (!displayName) {
+    res.status(400).json({ error: "displayName is required" });
+    return;
+  }
+  if (tooLong(displayName, MAX_DISPLAY_NAME_LENGTH)) {
+    res.status(400).json({ error: `displayName must be at most ${MAX_DISPLAY_NAME_LENGTH} characters` });
+    return;
+  }
+  const account: Account | undefined = renameAccount(db, accountId, displayName);
   res.json(account);
 });
 
@@ -340,31 +356,8 @@ app.get("/api/rooms/:roomId/reorder-tokens/:accountId", (req, res) => {
 
 // There is no search: YouTube offers none without the Data API v3, which
 // this course can't use (docs/adr/0003-youtube-metadata-via-oembed.md).
-// Songs come from pasted links.
-
-// Accepts a pasted YouTube URL or a bare videoId, parses it, and looks up
-// its metadata (including whether it's actually embeddable) in one step.
-app.post("/api/youtube/resolve", async (req, res) => {
-  const body = req.body as { input?: unknown };
-  const input = typeof body.input === "string" ? body.input : "";
-  const videoId = input ? parseYouTubeVideoId(input) : null;
-
-  if (!videoId) {
-    res.status(400).json({ error: "not a recognizable YouTube video URL or videoId" });
-    return;
-  }
-
-  try {
-    const metadata: YoutubeVideoMetadata | null = await getVideoMetadata(videoId);
-    if (!metadata) {
-      res.status(404).json({ error: "video not found" });
-      return;
-    }
-    res.json(metadata);
-  } catch (err) {
-    handleYoutubeError(res, err);
-  }
-});
+// Songs come from pasted links, added straight to a room's queue (the queue
+// route above looks each one up itself).
 
 // Renders README.md at /readme/, satisfying spec/invariants.test.ts (every
 // heading must appear, in order, in the served page).

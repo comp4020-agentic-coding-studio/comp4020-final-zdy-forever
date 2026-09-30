@@ -365,6 +365,14 @@ form {
   font-weight: 700;
 }
 
+.name-row {
+  align-items: center;
+}
+
+.name-row p {
+  margin: 0;
+}
+
 .lobby-alert {
   margin: 0;
   padding: 0.7rem 1rem;

@@ -41,3 +41,12 @@ export function registerAccount(db: DatabaseSync, clientId: string, displayName:
 
   return account;
 }
+
+// Changes the name an account is shown by. accountId stays its identity, so
+// everything that looks the name up live (presence on the next connection,
+// the DJ label, queue attributions) follows; a reaction keeps the name it was
+// sent under, since it's a record of that moment (see db.ts's reactions).
+export function renameAccount(db: DatabaseSync, accountId: string, displayName: string): Account | undefined {
+  db.prepare("UPDATE accounts SET displayName = ? WHERE accountId = ?").run(displayName, accountId);
+  return getAccountById(db, accountId);
+}

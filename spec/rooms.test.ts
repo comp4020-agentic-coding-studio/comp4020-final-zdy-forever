@@ -88,6 +88,31 @@ it("has no search endpoint, and answers an unknown API path with a JSON 404", as
   expect(await res.json()).toEqual({ error: "no such API endpoint" });
 });
 
+describe("changing your name", () => {
+  it("renames the calling account, keeping its accountId, and a refresh picks the new name back up", async () => {
+    const alice = await register("Alice");
+
+    const renamed = await post("/api/account/name", { ...alice, displayName: "  Alicia  " });
+    expect(renamed.status).toBe(200);
+    expect(renamed.body).toMatchObject({ accountId: alice.accountId, displayName: "Alicia" });
+
+    expect((await post("/api/session", { clientId: alice.clientId })).body.account).toMatchObject({
+      accountId: alice.accountId,
+      displayName: "Alicia",
+    });
+  });
+
+  it("requires the account's own clientId, and a name within the limit", async () => {
+    const alice = await register("Alice");
+    const mallory = await register("Mallory");
+
+    expect((await post("/api/account/name", { accountId: alice.accountId, clientId: mallory.clientId, displayName: "Pwned" })).status).toBe(401);
+    expect((await post("/api/account/name", { ...alice, displayName: "x".repeat(33) })).status).toBe(400);
+    expect((await post("/api/account/name", { ...alice, displayName: "   " })).status).toBe(400);
+    expect((await post("/api/session", { clientId: alice.clientId })).body.account).toMatchObject({ displayName: "Alice" });
+  });
+});
+
 describe("rooms", () => {
   it("lists a new public room in the lobby with its live occupancy, and never a private one", async () => {
     const alice = await register("Alice");

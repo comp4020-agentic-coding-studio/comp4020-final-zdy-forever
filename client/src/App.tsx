@@ -7,7 +7,6 @@ import {
   type LobbyRoom,
   type QueueItem,
   type Room,
-  type YoutubeVideoMetadata,
 } from "../../shared/src/types.ts";
 import { getClientId } from "./clientId.ts";
 import { loadRoomId, saveRoomId } from "./roomSession.ts";
@@ -43,10 +42,11 @@ function App() {
   const [displayName, setDisplayName] = useState("");
   const [account, setAccount] = useState<Account | "error" | null>(null);
 
-  const [videoId, setVideoId] = useState<string | null>(null);
+  // The name being typed in while renaming, or null when not renaming.
+  const [nameDraft, setNameDraft] = useState<string | null>(null);
+  const [renameError, setRenameError] = useState<string | null>(null);
 
   const [urlInput, setUrlInput] = useState("");
-  const [resolveError, setResolveError] = useState<string | null>(null);
   // Result of the last "add to queue" in a room — the queue itself only ever
   // changes via the server's queue:itemAdded broadcast.
   const [addStatus, setAddStatus] = useState<{ ok: boolean; text: string } | null>(null);
@@ -96,31 +96,6 @@ function App() {
     }
   };
 
-  const resolveUrl = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setResolveError(null);
-    try {
-      const res = await fetch("/api/youtube/resolve", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ input: urlInput }),
-      });
-      const body = (await res.json()) as YoutubeVideoMetadata | { error: string };
-      if (!res.ok) {
-        setResolveError("error" in body ? body.error : "could not resolve that link");
-        return;
-      }
-      const metadata = body as YoutubeVideoMetadata;
-      if (!metadata.embeddable) {
-        setResolveError("that video can't be embedded elsewhere");
-        return;
-      }
-      setVideoId(metadata.videoId);
-    } catch {
-      setResolveError("could not resolve that link");
-    }
-  };
-
   const refreshLobby = useCallback(() => {
     fetch("/api/lobby")
       .then((res) => (res.ok ? (res.json() as Promise<LobbyRoom[]>) : Promise.reject()))
@@ -142,7 +117,6 @@ function App() {
   // the authoritative snapshot. The REST calls before this only admit the
   // account (and check a private room's code).
   const enterRoom = (roomId: string) => {
-    setVideoId(null);
     setRoomActionError(null);
     setAddStatus(null);
     saveRoomId(roomId);
@@ -238,20 +212,34 @@ function App() {
     return result.ok;
   };
 
+  // The account keeps its accountId; only the name everyone sees changes
+  // (see POST /api/account/name).
+  const rename = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (nameDraft === null) return;
+    const result = await postJson<Account>("/api/account/name", { ...credentials(), displayName: nameDraft });
+    if (!result.ok) {
+      setRenameError(result.error);
+      return;
+    }
+    setAccount(result.data);
+    setNameDraft(null);
+    setRenameError(null);
+  };
+
   const addLinkToQueue = async (e: React.FormEvent) => {
     e.preventDefault();
     if (await addToQueue(urlInput)) setUrlInput("");
   };
 
-  // Always visible regardless of room state (CLAUDE.md: keep the YouTube
-  // player visible) — sits above both the setup and in-room regions below,
-  // never inside a conditional that could unmount it.
+  // Shown whenever you're in a room, always at the top (CLAUDE.md: keep the
+  // YouTube player visible). The lobby has nothing to play, so no player.
   const playerCard = (
     <div className="card card--accent-pink">
       <h2>🎬 Now playing</h2>
       <YoutubePlayer
         ref={playerRef}
-        videoId={live.playback?.videoId ?? videoId}
+        videoId={live.playback?.videoId ?? null}
         onStateChange={live.handlePlayerStateChange}
         onReady={live.handlePlayerReady}
       />
@@ -269,8 +257,9 @@ function App() {
     </div>
   );
 
-  // Before a room: pick a name, then start a room, join one by code, or
-  // pick one from the public lobby.
+  // Before a room: pick (or change) a name, then create a room, join one by
+  // code, or pick one from the public lobby. No player and no song links
+  // here: those belong to being in a room.
   const lobbyRegion = (
     <section className="section-stack">
       {/* At the top, where it's seen: this is also why someone just landed
@@ -283,9 +272,42 @@ function App() {
       <div className="card card--accent-purple">
         <h2>🙋 Your name</h2>
         {account && account !== "error" ? (
-          <p>
-            signed in as <strong>{account.displayName}</strong>
-          </p>
+          nameDraft === null ? (
+            <div className="btn-row name-row">
+              <p>
+                signed in as <strong>{account.displayName}</strong>
+              </p>
+              <button type="button" className="btn btn--sm" onClick={() => setNameDraft(account.displayName)}>
+                ✏️ Change name
+              </button>
+            </div>
+          ) : (
+            <form onSubmit={rename}>
+              <input
+                value={nameDraft}
+                onChange={(e) => setNameDraft(e.target.value)}
+                placeholder="new display name"
+                aria-label="new display name"
+                maxLength={32}
+                required
+                autoFocus
+              />
+              <button type="submit" className="btn btn--purple">
+                Save
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  setNameDraft(null);
+                  setRenameError(null);
+                }}
+              >
+                Cancel
+              </button>
+              {renameError && <p role="alert">{renameError}</p>}
+            </form>
+          )
         ) : (
           <form onSubmit={register}>
             <input
@@ -305,7 +327,7 @@ function App() {
       </div>
 
       <div className="card card--accent-green">
-        <h2>✨ Start a room</h2>
+        <h2>✨ Create a room</h2>
         <form className="form--stack" onSubmit={createRoom}>
           <input
             value={newRoomName}
@@ -360,7 +382,7 @@ function App() {
           </button>
         </div>
         {lobby === "error" && <p role="alert">couldn't load the room list</p>}
-        {Array.isArray(lobby) && lobby.length === 0 && <p>no public rooms yet — start one!</p>}
+        {Array.isArray(lobby) && lobby.length === 0 && <p>no public rooms yet — create one!</p>}
         {Array.isArray(lobby) && lobby.length > 0 && (
           <ul className="queue-list">
             {lobby.map((room) => (
@@ -381,20 +403,20 @@ function App() {
             ))}
           </ul>
         )}
-        {!accountId && <p>pick a display name above to start or join a room</p>}
+        {!accountId && <p>pick a display name above to create or join a room</p>}
       </div>
     </section>
   );
 
   // Songs come from pasted links (there's no search — see
-  // docs/adr/0003-youtube-metadata-via-oembed.md). In a room a link is added
-  // to its queue (no vote needed); outside one it's only previewed.
+  // docs/adr/0003-youtube-metadata-via-oembed.md), added straight to the
+  // room's queue (no vote needed).
   const inRoom = liveRoomId !== null;
   const songSection = (
     <section className="section-stack">
       <div className="card card--accent-blue">
-        <h2>🔗 {inRoom ? "Add a YouTube link" : "Preview a YouTube link"}</h2>
-        <form onSubmit={inRoom ? addLinkToQueue : resolveUrl}>
+        <h2>🔗 Add a YouTube link</h2>
+        <form onSubmit={addLinkToQueue}>
           <input
             value={urlInput}
             onChange={(e) => setUrlInput(e.target.value)}
@@ -402,11 +424,10 @@ function App() {
             aria-label="YouTube link"
           />
           <button type="submit" className="btn btn--blue">
-            {inRoom ? "➕ Add to queue" : "▶ Preview"}
+            ➕ Add to queue
           </button>
         </form>
-        {!inRoom && resolveError && <p role="alert">{resolveError}</p>}
-        {inRoom && addStatus && (
+        {addStatus && (
           <p role={addStatus.ok ? "status" : "alert"} className={addStatus.ok ? "notice" : undefined}>
             {addStatus.text}
           </p>
@@ -728,9 +749,15 @@ function App() {
         </span>
       </header>
 
-      {playerCard}
-      {inRoom ? roomRegion : lobbyRegion}
-      {songSection}
+      {inRoom ? (
+        <>
+          {playerCard}
+          {roomRegion}
+          {songSection}
+        </>
+      ) : (
+        lobbyRegion
+      )}
     </main>
   );
 }
