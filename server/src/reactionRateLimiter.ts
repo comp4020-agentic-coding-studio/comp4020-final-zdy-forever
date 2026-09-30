@@ -1,8 +1,7 @@
 import { checkRateLimit, type RateLimitState } from "../../shared/src/rateLimit.ts";
 
-// Reactions never require voting (CLAUDE.md's Voting section) and never
-// require a reorder-token-style scarce resource either — this is the only
-// thing standing between a client and reaction spam. In-memory only, never
+// Reactions never require voting (CLAUDE.md's Voting section), so this is
+// the only thing standing between a client and reaction spam. In-memory only, never
 // persisted (CLAUDE.md's Persistence section: "Do not persist ... transient
 // UI state") — mirrors server/src/presence.ts's ephemeral-store pattern.
 const REACTION_RATE_LIMIT = { limit: 8, windowMs: 10_000 };

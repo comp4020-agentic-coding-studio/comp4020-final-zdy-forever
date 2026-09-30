@@ -8,7 +8,6 @@ import type {
   Reaction,
   ReactionEmoji,
   ReactionEvent,
-  ReorderTokenBalance,
   Room,
   RoomSnapshot,
 } from "../../shared/src/types.ts";
@@ -72,12 +71,6 @@ export interface RoomLiveState {
   // controls once its vote has closed.
   lastProposalResult: ProposalBroadcast | null;
   proposalError: string | null;
-  // This client's own reorder-token balance in this room, or null before the
-  // initial fetch (right after join) has resolved. Always server-computed
-  // (see GET /api/rooms/:roomId/reorder-tokens/:accountId) — never tracked
-  // or decremented locally; reorderTokens:update is the only thing that ever
-  // changes it after the initial fetch.
-  reorderTokenBalance: ReorderTokenBalance | null;
   // Every reaction ever recorded against the currently-playing video —
   // seeded from room:snapshot/reactions:history, and what the echo-scanning
   // poll below matches local playback position against.
@@ -98,7 +91,6 @@ const EMPTY_STATE: RoomLiveState = {
   activeProposal: null,
   lastProposalResult: null,
   proposalError: null,
-  reorderTokenBalance: null,
   reactionHistory: [],
   liveReactions: [],
   reactionError: null,
@@ -213,27 +205,11 @@ export function usePlaybackSync(
         activeProposal: proposalView.active,
         lastProposalResult: proposalView.lastResult,
         proposalError: null,
-        reorderTokenBalance: s.reorderTokenBalance,
         reactionHistory: snapshot.reactionHistory,
         liveReactions: [],
         reactionError: null,
       }));
       applyAnchor(snapshot.playback);
-
-      // The snapshot itself carries no reorder-token balance (it's not part
-      // of room-shared state, unlike the queue/playback/presence above) — a
-      // fresh REST fetch on every (re)join keeps it correct even if this
-      // client missed reorderTokens:update broadcasts while disconnected.
-      fetch(`/api/rooms/${roomId}/reorder-tokens/${accountId}`)
-        .then((res) => (res.ok ? (res.json() as Promise<ReorderTokenBalance>) : null))
-        .then((balance) => {
-          if (balance) setState((s) => ({ ...s, reorderTokenBalance: balance }));
-        })
-        .catch(() => {
-          // Best-effort: a failed fetch just leaves the last-known (or null)
-          // balance in place; reorderTokens:update will correct it on the
-          // next successful reorder regardless.
-        });
     });
 
     socket.on("playback:update", (playback: PlaybackState | null) => {
@@ -288,15 +264,6 @@ export function usePlaybackSync(
     // client to reconstruct order incorrectly.
     socket.on("queue:reordered", ({ queue }: { queue: QueueItem[] }) => {
       setState((s) => ({ ...s, queue }));
-    });
-
-    // This account's reorder-token balance changed (a token was just spent
-    // by a passed reorder this account proposed) — filtered to this client's
-    // own accountId, since every client in the room receives every account's
-    // update but only cares about its own.
-    socket.on("reorderTokens:update", ({ accountId: forId, balance }: { accountId: string; balance: ReorderTokenBalance }) => {
-      if (forId !== accountId) return;
-      setState((s) => ({ ...s, reorderTokenBalance: balance }));
     });
 
     // The full historical reaction list for whatever video just became

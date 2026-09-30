@@ -102,7 +102,6 @@ Persist:
 - queue and who added each item
 - current playback state
 - reactions/history
-- reorder-token state
 
 Do not persist socket IDs or transient UI state.
 
@@ -116,7 +115,7 @@ Queue items use stable IDs.
 
 Concurrent additions must never overwrite each other.
 
-The queue holds only the current track and what's still to come: a track leaves it once it finishes (plays to its end or is skipped).
+Finished tracks (played to the end, or skipped) stay in the queue as history, above the current track. The queue view shows the current track as its first row; history is reached by scrolling up.
 
 The DJ for the current track is the account that added that queue item.
 
@@ -149,7 +148,7 @@ Voting rules:
 - required YES = floor(validVotes / 2) + 1
 - tie fails
 
-Exception: when the proposer is the only person in the room, there is nobody to vote with, so their proposal passes immediately (all other rules, e.g. DJ-only Seek and reorder tokens, still apply). See `docs/adr/0004-sole-listener-proposals-pass.md`.
+Exception: when the proposer is the only person in the room, there is nobody to vote with, so their proposal passes immediately (all other rules, e.g. DJ-only Seek, still apply). See `docs/adr/0004-sole-listener-proposals-pass.md`.
 
 One account gets one vote.
 
@@ -163,17 +162,11 @@ The server executes passed actions.
 
 Queue reorder uses drag-and-drop and voting.
 
-Each account:
+There is no limit on how often anyone may reorder: the vote is the only gate (see `docs/adr/0005-unlimited-reorders.md`, which replaced the original 5-token rule).
 
-- starts with 5 reorder tokens
-- maximum 5
-- recovers 1 every 5 minutes
+The current track never moves. Tracks still to come move only among themselves (never above the current track). A history track can only move down; placed after the current track, it will play again.
 
-Calculate regeneration from timestamps, not an in-memory repeating timer.
-
-Consume one token only after a reorder vote passes and a real reorder succeeds.
-
-Failed, stale or no-op reorder attempts cost nothing.
+Stale or no-op reorders never change the queue.
 
 ## Playback sync
 

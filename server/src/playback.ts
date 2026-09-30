@@ -146,65 +146,36 @@ export function ensureCurrentTrack(db: DatabaseSync, roomId: string, queueItemId
 // whole, not any one track. If there is no next item, playback stops
 // (nothing currently playing) rather than wrapping back around.
 //
-// The track that just finished (played to its end, or skipped) leaves the
-// queue as part of the same transaction: the queue only ever holds what's
-// playing and what's still to come. That changes queue membership, so
-// queueRevision advances too. The caller tells clients (queue:itemRemoved).
+// The track that just finished (played to its end, or skipped) stays in
+// the queue as history, above the new current track: a history track can be
+// moved back down after the current one to play again (see queue.ts's
+// planQueueReorder), and the queue view scrolls it out of sight above the
+// current track.
 export function advanceToNextTrack(db: DatabaseSync, roomId: string): PlaybackState | null {
-  const finished = getPlaybackRow(db, roomId);
   const next = getNextTrack(db, roomId);
-  const nowMs = Date.now();
-
-  db.exec("BEGIN");
-  try {
-    if (next) {
-      db.prepare(
-        `INSERT INTO room_playback
-           (roomId, playbackId, queueItemId, startedAt, status, anchorPositionMs, anchorServerTimeMs, revision)
-         VALUES (?, ?, ?, ?, 'PLAYING', 0, ?, ?)
-         ON CONFLICT(roomId) DO UPDATE SET
-           playbackId = excluded.playbackId,
-           queueItemId = excluded.queueItemId,
-           startedAt = excluded.startedAt,
-           status = excluded.status,
-           anchorPositionMs = excluded.anchorPositionMs,
-           anchorServerTimeMs = excluded.anchorServerTimeMs,
-           revision = excluded.revision`,
-      ).run(roomId, randomUUID(), next.queueItemId, new Date(nowMs).toISOString(), nowMs, (finished?.revision ?? 0) + 1);
-    } else {
-      db.prepare("DELETE FROM room_playback WHERE roomId = ?").run(roomId);
-    }
-    if (finished) {
-      db.prepare("DELETE FROM queue_items WHERE queueItemId = ?").run(finished.queueItemId);
-      db.prepare("UPDATE rooms SET queueRevision = queueRevision + 1 WHERE roomId = ?").run(roomId);
-    }
-    db.exec("COMMIT");
-  } catch (err) {
-    db.exec("ROLLBACK");
-    throw err;
+  if (!next) {
+    db.prepare("DELETE FROM room_playback WHERE roomId = ?").run(roomId);
+    return null;
   }
 
-  return next ? getCurrentPlayback(db, roomId) : null;
-}
+  const previousRevision = getPlaybackRow(db, roomId)?.revision ?? 0;
+  const nowMs = Date.now();
 
-// Called once at startup: drops tracks that had already finished before
-// finished tracks started leaving the queue (see advanceToNextTrack) — in a
-// room that's playing, everything ordered before the current track; in one
-// that isn't, everything, since a room with nothing playing only ever
-// starts a newly added track, never one already queued. Idempotent.
-export function removeFinishedTracksOnStartup(db: DatabaseSync): void {
-  db.exec(`
-    DELETE FROM queue_items
-     WHERE roomId NOT IN (SELECT roomId FROM room_playback)
-        OR EXISTS (
-             SELECT 1
-               FROM room_playback p
-               JOIN queue_items cur ON cur.queueItemId = p.queueItemId
-              WHERE p.roomId = queue_items.roomId
-                AND (queue_items.position < cur.position
-                     OR (queue_items.position = cur.position AND queue_items.rowid < cur.rowid))
-           )
-  `);
+  db.prepare(
+    `INSERT INTO room_playback
+       (roomId, playbackId, queueItemId, startedAt, status, anchorPositionMs, anchorServerTimeMs, revision)
+     VALUES (?, ?, ?, ?, 'PLAYING', 0, ?, ?)
+     ON CONFLICT(roomId) DO UPDATE SET
+       playbackId = excluded.playbackId,
+       queueItemId = excluded.queueItemId,
+       startedAt = excluded.startedAt,
+       status = excluded.status,
+       anchorPositionMs = excluded.anchorPositionMs,
+       anchorServerTimeMs = excluded.anchorServerTimeMs,
+       revision = excluded.revision`,
+  ).run(roomId, randomUUID(), next.queueItemId, new Date(nowMs).toISOString(), nowMs, previousRevision + 1);
+
+  return getCurrentPlayback(db, roomId);
 }
 
 // Applies a passed PLAY/PAUSE proposal (see ProposalManager in

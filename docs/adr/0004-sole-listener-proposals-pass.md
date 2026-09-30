@@ -25,9 +25,9 @@ the realtime layer. The pure voting engine (`shared/src/voting.ts`) is
 unchanged.
 
 Everything checked before a vote would open still applies: only the DJ may
-Seek, a reorder needs a token (and spends one), a no-op or not-upcoming
-reorder is refused, Play-while-playing is refused, and so on. The passed
-proposal goes through the same execution path as a vote that passed.
+Seek, a no-op or disallowed reorder is refused, Play-while-playing is
+refused, and so on. The passed proposal goes through the same execution path
+as a vote that passed.
 
 ## Consequences
 

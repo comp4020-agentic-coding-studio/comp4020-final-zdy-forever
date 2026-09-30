@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   REACTION_EMOJIS,
   type Account,
@@ -8,6 +8,7 @@ import {
   type QueueItem,
   type Room,
 } from "../../shared/src/types.ts";
+import { placementAllowed } from "../../shared/src/queueRules.ts";
 import { getClientId } from "./clientId.ts";
 import { loadRoomId, saveRoomId } from "./roomSession.ts";
 import { usePlaybackSync } from "./usePlaybackSync.ts";
@@ -69,10 +70,51 @@ function App() {
 
   const accountId = account && account !== "error" ? account.accountId : null;
   const live = usePlaybackSync(liveRoomId, accountId, getClientId(), playerRef);
-  // Index of the first track still to come: right after the playing one, or
-  // the whole queue when nothing is playing (mirrors server/src/queue.ts's
-  // upcomingOf).
-  const firstUpcomingIndex = live.queue.findIndex((q) => q.queueItemId === live.playback?.queueItemId) + 1;
+  // The queue is history (already played), the current track, then what's
+  // still to come. -1: nothing is playing, so every track counts as to come.
+  const currentIndex = live.queue.findIndex((q) => q.queueItemId === live.playback?.queueItemId);
+  // Whether the track at `from` may be moved in front of the one at `to`
+  // (queue.length: the very end) — the server's own rule, never a no-op.
+  const canMove = (from: number, to: number) => to !== from && to !== from + 1 && placementAllowed(currentIndex, from, to);
+
+  // The queue list shows the current track as its first row, with history
+  // scrolled out of sight above it: the list is sized to hold the current
+  // track and what's still to come (up to its CSS max-height), and scrolled
+  // so the current track sits at the top. Re-anchored whenever the current
+  // track, or how much history is above it, changes; the locate button
+  // scrolls back to it on demand.
+  const queueListRef = useRef<HTMLUListElement>(null);
+  const anchoredKeyRef = useRef<string | null>(null);
+  const currentRow = () => queueListRef.current?.querySelector<HTMLElement>(".queue-item--current") ?? null;
+  const sizeQueueList = useCallback(() => {
+    const list = queueListRef.current;
+    const current = list?.querySelector<HTMLElement>(".queue-item--current");
+    const last = list?.lastElementChild as HTMLElement | null | undefined;
+    if (!list) return;
+    if (!current || !last || current === list.firstElementChild) {
+      list.style.height = "";
+      return;
+    }
+    list.style.height = `${last.offsetTop + last.offsetHeight - current.offsetTop}px`;
+  }, []);
+  const scrollQueueToCurrent = (behavior: ScrollBehavior) => {
+    const current = currentRow();
+    if (current) queueListRef.current?.scrollTo({ top: current.offsetTop, behavior });
+  };
+  const queueKey = live.queue.map((q) => q.queueItemId).join(",");
+  useLayoutEffect(() => {
+    sizeQueueList();
+    const anchorKey = `${live.playback?.queueItemId ?? ""}:${currentIndex}`;
+    if (anchoredKeyRef.current !== anchorKey) {
+      anchoredKeyRef.current = anchorKey;
+      scrollQueueToCurrent("auto");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queueKey, live.playback?.queueItemId, currentIndex, liveRoomId, sizeQueueList]);
+  useEffect(() => {
+    window.addEventListener("resize", sizeQueueList);
+    return () => window.removeEventListener("resize", sizeQueueList);
+  }, [sizeQueueList]);
 
   useEffect(() => {
     fetch("/api/health")
@@ -436,12 +478,12 @@ function App() {
     </section>
   );
 
-  // The live room: vote > DJ+listeners > queue(+tokens) > reactions — see
+  // The live room: vote > DJ+listeners > queue > reactions — see
   // .room-grid in index.css for how this priority order is kept on both
   // desktop (two columns) and mobile (single column) breakpoints. Every
   // conditional below mirrors the original gating exactly (e.g. reactions
   // and the vote/controls panel only render once live.playback exists;
-  // presence, reorder tokens and the queue render regardless), just spread
+  // presence and the queue render regardless), just spread
   // across separate cards instead of one big block.
   const roomRegion = liveRoomId && (
     <section className="section-stack">
@@ -591,45 +633,45 @@ function App() {
         </div>
 
         <div className="card card--queue card--accent-green">
-          <h2>📜 Queue ({live.queue.length})</h2>
-          {live.reorderTokenBalance && (
-            <div className="token-row">
-              {Array.from({ length: live.reorderTokenBalance.maxTokens }).map((_, i) => (
-                <span
-                  key={i}
-                  className={`token-pip ${i < live.reorderTokenBalance!.tokens ? "token-pip--filled" : "token-pip--empty"}`}
-                  aria-hidden="true"
-                />
-              ))}
-              <span>
-                {live.reorderTokenBalance.tokens}/{live.reorderTokenBalance.maxTokens} reorder tokens
-                {live.reorderTokenBalance.nextRegenAt && (
-                  <> · next +1 at {new Date(live.reorderTokenBalance.nextRegenAt).toLocaleTimeString()}</>
-                )}
-              </span>
-            </div>
-          )}
-          <ul className="queue-list">
+          <div className="queue-heading">
+            <h2>📜 Queue ({live.queue.length})</h2>
+            {currentIndex >= 0 && (
+              <button
+                type="button"
+                className="btn btn--sm"
+                onClick={() => scrollQueueToCurrent("smooth")}
+                aria-label="scroll the queue back to the track playing now"
+              >
+                📍 Now playing
+              </button>
+            )}
+          </div>
+          <ul className="queue-list" ref={queueListRef}>
             {live.queue.map((item, index) => {
-              // The queue is the playing track and what's still to come
-              // (finished ones leave it). Only the tracks still to come can
-              // be reordered, and only among themselves — the server rejects
-              // anything else as NOT_UPCOMING.
-              const upcoming = index >= firstUpcomingIndex;
-              const state = upcoming ? "upcoming" : "current";
+              // History (played, above the current track) can only move
+              // down — past the current track it plays again; what's still
+              // to come moves only among itself; the current track stays
+              // put. The same rule the server enforces (shared/src/queueRules.ts).
+              const state =
+                currentIndex === -1 || index > currentIndex ? "upcoming" : index === currentIndex ? "current" : "history";
+              const dragFrom = dragQueueItemId ? live.queue.findIndex((q) => q.queueItemId === dragQueueItemId) : -1;
+              const upTarget = index - 1;
+              const downTarget = Math.min(index + 2, live.queue.length);
               return (
               <li
                 key={item.queueItemId}
                 className={`queue-item queue-item--${state}`}
-                draggable={upcoming}
+                draggable={state !== "current"}
                 onDragStart={() => setDragQueueItemId(item.queueItemId)}
                 onDragEnd={() => setDragQueueItemId(null)}
                 onDragOver={(e) => {
-                  if (upcoming) e.preventDefault();
+                  if (dragFrom !== -1 && canMove(dragFrom, index)) e.preventDefault();
                 }}
                 onDrop={(e) => {
                   e.preventDefault();
-                  if (dragQueueItemId && upcoming) live.requestReorderQueueProposal(dragQueueItemId, item.queueItemId);
+                  if (dragQueueItemId && dragFrom !== -1 && canMove(dragFrom, index)) {
+                    live.requestReorderQueueProposal(dragQueueItemId, item.queueItemId);
+                  }
                   setDragQueueItemId(null);
                 }}
               >
@@ -644,7 +686,7 @@ function App() {
                 <button
                   type="button"
                   className="btn btn--sm"
-                  disabled={!upcoming || index === firstUpcomingIndex}
+                  disabled={upTarget < 0 || !canMove(index, upTarget)}
                   aria-label={`move "${item.title}" up in the queue`}
                   onClick={() =>
                     live.requestReorderQueueProposal(item.queueItemId, live.queue[index - 1].queueItemId)
@@ -655,7 +697,7 @@ function App() {
                 <button
                   type="button"
                   className="btn btn--sm"
-                  disabled={!upcoming || index === live.queue.length - 1}
+                  disabled={!canMove(index, downTarget)}
                   aria-label={`move "${item.title}" down in the queue`}
                   onClick={() =>
                     live.requestReorderQueueProposal(
@@ -682,19 +724,6 @@ function App() {
               </li>
               );
             })}
-            {/* Drop target for dragging an item to the very end of the queue
-                — beforeQueueItemId: null means "move to the end." */}
-            <li
-              className="queue-drop-target"
-              onDragOver={(e) => e.preventDefault()}
-              onDrop={(e) => {
-                e.preventDefault();
-                if (dragQueueItemId) live.requestReorderQueueProposal(dragQueueItemId, null);
-                setDragQueueItemId(null);
-              }}
-            >
-              drop here to move to end of queue
-            </li>
           </ul>
         </div>
 

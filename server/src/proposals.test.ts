@@ -6,10 +6,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Account, YoutubeVideoMetadata } from "../../shared/src/types.ts";
 import { registerAccount } from "./accounts.ts";
 import { openDatabase } from "./db.ts";
-import { advanceToNextTrack, ensureCurrentTrack, getCurrentPlayback, setPlaybackStatus } from "./playback.ts";
+import { advanceToNextTrack, ensureCurrentTrack, getCurrentPlayback, getNextTrack, setPlaybackStatus } from "./playback.ts";
 import { ProposalManager, type ProposalBroadcast } from "./proposals.ts";
 import { addTrack, getQueueRevision, listQueue, removeQueueItem } from "./queue.ts";
-import { consumeReorderToken, getReorderTokenBalance } from "./reorderTokenStore.ts";
 import { createRoom, getRoomById } from "./rooms.ts";
 
 // A minimal io.Server stand-in: ProposalManager only ever calls
@@ -811,7 +810,7 @@ describe("ProposalManager", () => {
 
   // --- REORDER_QUEUE ------------------------------------------------------
 
-  it("reorders the queue once a REORDER_QUEUE vote passes and consumes exactly one reorder token from the proposer", async () => {
+  it("reorders the queue once a REORDER_QUEUE vote passes", async () => {
     const manager = new ProposalManager();
     const { io, emitted } = fakeIo();
     const b = await addTrack(db, roomId, bob.accountId, SONG_ID, { resolveMetadata });
@@ -848,14 +847,10 @@ describe("ProposalManager", () => {
       b.queueItemId,
     ]);
 
-    const tokenEvent = emitted.find((e) => e.event === "reorderTokens:update");
-    expect((tokenEvent?.payload as { accountId: string; balance: { tokens: number } }).accountId).toBe(alice.accountId);
-    expect((tokenEvent?.payload as { accountId: string; balance: { tokens: number } }).balance.tokens).toBe(4);
-    expect(getReorderTokenBalance(db, roomId, alice.accountId).tokens).toBe(4);
     expect(manager.getActiveProposal(roomId)).toBeNull();
   });
 
-  it("does not consume a reorder token when a REORDER_QUEUE proposal fails its vote", async () => {
+  it("leaves the queue alone when a REORDER_QUEUE proposal fails its vote", async () => {
     const manager = new ProposalManager();
     const { io, emitted } = fakeIo();
     const b = await addTrack(db, roomId, bob.accountId, SONG_ID, { resolveMetadata });
@@ -874,17 +869,15 @@ describe("ProposalManager", () => {
     await sleep(60);
 
     expect(listQueue(db, roomId).map((q) => q.queueItemId)).toEqual(beforeQueue);
-    expect(getReorderTokenBalance(db, roomId, alice.accountId).tokens).toBe(5);
 
     const resolutions = emitted.filter((e) => e.event === "proposal:update").map((e) => e.payload as ProposalBroadcast);
     const final = resolutions[resolutions.length - 1];
     expect(final.proposal.state).toBe("FAILED");
     expect(final.applied).toBe(false);
     expect(emitted.some((e) => e.event === "queue:reordered")).toBe(false);
-    expect(emitted.some((e) => e.event === "reorderTokens:update")).toBe(false);
   });
 
-  it("does not apply a passed REORDER_QUEUE proposal once queueRevision has moved on mid-vote, and consumes no token", async () => {
+  it("does not apply a passed REORDER_QUEUE proposal once queueRevision has moved on mid-vote", async () => {
     const manager = new ProposalManager();
     const { io, emitted } = fakeIo();
     const b = await addTrack(db, roomId, bob.accountId, SONG_ID, { resolveMetadata });
@@ -910,14 +903,12 @@ describe("ProposalManager", () => {
     // b and c are still in their original relative order — never reordered —
     // only d (removed out of band) is gone.
     expect(listQueue(db, roomId).map((q) => q.queueItemId)).toEqual(beforeOrder.filter((id) => id !== d.queueItemId));
-    expect(getReorderTokenBalance(db, roomId, alice.accountId).tokens).toBe(5);
 
     const resolution = emitted.find(
       (e) => e.event === "proposal:update" && (e.payload as ProposalBroadcast).proposal.state === "PASSED",
     );
     expect((resolution?.payload as ProposalBroadcast).applied).toBe(false);
     expect(emitted.some((e) => e.event === "queue:reordered")).toBe(false);
-    expect(emitted.some((e) => e.event === "reorderTokens:update")).toBe(false);
   });
 
   it("rejects a second REORDER_QUEUE proposal request while one is already open in the same room", async () => {
@@ -963,7 +954,7 @@ describe("ProposalManager", () => {
     expect(manager.getActiveProposal(roomId)).toBeNull();
   });
 
-  it("rejects a REORDER_QUEUE request that would move a track in front of the playing one with a typed NOT_UPCOMING error, spending nothing", async () => {
+  it("rejects a REORDER_QUEUE request that would move a track in front of the playing one with a typed MOVE_NOT_ALLOWED error", async () => {
     const manager = new ProposalManager();
     const { io } = fakeIo();
     const current = getCurrentPlayback(db, roomId)!;
@@ -978,32 +969,29 @@ describe("ProposalManager", () => {
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.code).toBe("NOT_UPCOMING");
+    expect(result.code).toBe("MOVE_NOT_ALLOWED");
     expect(manager.getActiveProposal(roomId)).toBeNull();
-    expect(getReorderTokenBalance(db, roomId, alice.accountId).tokens).toBe(5);
   });
 
-  it("rejects a REORDER_QUEUE request from an account with no reorder tokens remaining with a typed NO_REORDER_TOKENS error", async () => {
+  // Reorders used to be rationed (5 tokens, 1 back every 5 minutes); the
+  // vote is now the only gate (docs/adr/0005).
+  it("places no limit on how many times one account may reorder", async () => {
     const manager = new ProposalManager();
     const { io } = fakeIo();
     const b = await addTrack(db, roomId, bob.accountId, SONG_ID, { resolveMetadata });
     const c = await addTrack(db, roomId, carol.accountId, SONG_ID, { resolveMetadata });
 
-    for (let i = 0; i < 5; i += 1) {
-      consumeReorderToken(db, roomId, alice.accountId, Date.now());
+    // Well past the old cap of 5: swap b and c back and forth.
+    for (let i = 0; i < 8; i += 1) {
+      const [moved, before] = i % 2 === 0 ? [c, b] : [b, c];
+      const result = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "REORDER_QUEUE", {
+        presentCount: 1,
+        queueItemId: moved.queueItemId,
+        beforeQueueItemId: before.queueItemId,
+      });
+      expect(result.ok && result.proposal.state).toBe("PASSED");
     }
-    expect(getReorderTokenBalance(db, roomId, alice.accountId).tokens).toBe(0);
-
-    const result = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "REORDER_QUEUE", {
-      votingWindowMs: 5_000,
-      queueItemId: c.queueItemId,
-      beforeQueueItemId: b.queueItemId,
-    });
-
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.code).toBe("NO_REORDER_TOKENS");
-    expect(manager.getActiveProposal(roomId)).toBeNull();
+    expect(listQueue(db, roomId).map((q) => q.queueItemId).slice(1)).toEqual([b.queueItemId, c.queueItemId]);
   });
 });
 
@@ -1306,28 +1294,30 @@ describe("ProposalManager with a sole listener", () => {
     expect(getCurrentPlayback(db, roomId)?.status).toBe("PLAYING");
   });
 
-  it("drops a skipped track from the queue and tells the room", async () => {
+  it("keeps a skipped track as history, which can then be moved back down to play again", async () => {
     const manager = new ProposalManager();
-    const { io, emitted } = fakeIo();
+    const { io } = fakeIo();
     const skipped = getCurrentPlayback(db, roomId)!.queueItemId;
     const next = await addTrack(db, roomId, alice.accountId, SONG_ID, { resolveMetadata });
+    const last = await addTrack(db, roomId, alice.accountId, SONG_ID, { resolveMetadata });
 
     manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "SKIP", SOLO);
+    expect(listQueue(db, roomId).map((q) => q.queueItemId)).toEqual([skipped, next.queueItemId, last.queueItemId]);
 
-    expect(listQueue(db, roomId).map((q) => q.queueItemId)).toEqual([next.queueItemId]);
-    expect(emitted).toContainEqual({ roomId, event: "queue:itemRemoved", payload: { queueItemId: skipped } });
-  });
+    const up = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "REORDER_QUEUE", {
+      ...SOLO,
+      queueItemId: last.queueItemId,
+      beforeQueueItemId: skipped,
+    });
+    expect(!up.ok && up.code).toBe("MOVE_NOT_ALLOWED"); // nothing moves above the playing track
 
-  it("drops a track that played to its end from the queue and tells the room", async () => {
-    const manager = new ProposalManager();
-    const { io, emitted } = fakeIo();
-    const ended = getCurrentPlayback(db, roomId)!;
-    const next = await addTrack(db, roomId, alice.accountId, SONG_ID, { resolveMetadata });
-
-    manager.handleTrackEnded(io, db, roomId, ended.playbackId, { accountId: alice.accountId, presentCount: 1 });
-
-    expect(listQueue(db, roomId).map((q) => q.queueItemId)).toEqual([next.queueItemId]);
-    expect(emitted).toContainEqual({ roomId, event: "queue:itemRemoved", payload: { queueItemId: ended.queueItemId } });
+    manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "REORDER_QUEUE", {
+      ...SOLO,
+      queueItemId: skipped,
+      beforeQueueItemId: last.queueItemId,
+    });
+    expect(listQueue(db, roomId).map((q) => q.queueItemId)).toEqual([next.queueItemId, skipped, last.queueItemId]);
+    expect(getNextTrack(db, roomId)?.queueItemId).toBe(skipped);
   });
 
   it("still enforces every request-time rule for a sole listener", () => {
@@ -1341,7 +1331,7 @@ describe("ProposalManager with a sole listener", () => {
     expect(play.ok).toBe(false); // already playing
   });
 
-  it("spends a reorder token on a sole listener's reorder, just as on a passed vote", async () => {
+  it("applies a sole listener's reorder at once, just like a passed vote", async () => {
     const manager = new ProposalManager();
     const { io } = fakeIo();
     const b = await addTrack(db, roomId, alice.accountId, SONG_ID, { resolveMetadata });
@@ -1354,7 +1344,6 @@ describe("ProposalManager with a sole listener", () => {
     });
 
     expect(listQueue(db, roomId).map((q) => q.queueItemId).slice(1)).toEqual([c.queueItemId, b.queueItemId]);
-    expect(getReorderTokenBalance(db, roomId, alice.accountId).tokens).toBe(4);
   });
 
   it("opens an ordinary vote as soon as a second person is present", () => {

@@ -14,11 +14,10 @@ import {
   getNextTrack,
   recordServerAlive,
   recoverPlaybackOnStartup,
-  removeFinishedTracksOnStartup,
   setPlaybackStatus,
 } from "./playback.ts";
 import { PresenceStore } from "./presence.ts";
-import { addTrack, getQueueRevision, listQueue } from "./queue.ts";
+import { addTrack, listQueue } from "./queue.ts";
 import { createRoom } from "./rooms.ts";
 
 describe("playback state and DJ role", () => {
@@ -123,45 +122,16 @@ describe("playback state and DJ role", () => {
     expect(getCurrentPlayback(db, roomId)?.dj.accountId).toBe(bob.accountId);
   });
 
-  // The queue only holds what's playing and what's still to come: a track
-  // that has finished (or been skipped) leaves it as the room moves on.
-  it("removes the finished track from the queue when advancing, and moves queueRevision on", async () => {
+  // A finished (or skipped) track stays in the queue as history, above the
+  // new current track — see queue.ts's placementAllowed for how it goes back on.
+  it("keeps the finished track in the queue as history when advancing", async () => {
     const first = await addAndMaybeStart(alice.accountId, SONG_A_ID);
     const second = await addAndMaybeStart(bob.accountId, SONG_B_ID);
-    const revisionBefore = getQueueRevision(db, roomId);
 
     advanceToNextTrack(db, roomId);
 
-    expect(listQueue(db, roomId).map((q) => q.queueItemId)).toEqual([second.queueItemId]);
-    expect(getQueueRevision(db, roomId)).toBe(revisionBefore + 1);
-    expect(listQueue(db, roomId).some((q) => q.queueItemId === first.queueItemId)).toBe(false);
-  });
-
-  it("leaves an empty queue once the last track finishes", async () => {
-    await addAndMaybeStart(alice.accountId, SONG_A_ID);
-
-    advanceToNextTrack(db, roomId);
-
-    expect(getCurrentPlayback(db, roomId)).toBeNull();
-    expect(listQueue(db, roomId)).toEqual([]);
-  });
-
-  it("clears out tracks that finished before finished tracks left the queue, once, at startup", async () => {
-    // As an older database left it: a's row kept after it finished.
-    const a = await addAndMaybeStart(alice.accountId, SONG_A_ID);
-    const b = await addAndMaybeStart(alice.accountId, SONG_B_ID);
-    const c = await addAndMaybeStart(alice.accountId, SONG_A_ID);
-    db.prepare("UPDATE room_playback SET queueItemId = ? WHERE roomId = ?").run(b.queueItemId, roomId);
-    // ...and a room that had drained, with nothing playing and its old rows left behind.
-    const drained = createRoom(db, { accountId: bob.accountId, name: "Drained", visibility: "PUBLIC", autoCloseEnabled: false }).roomId;
-    await addTrack(db, drained, bob.accountId, SONG_B_ID, { resolveMetadata });
-
-    removeFinishedTracksOnStartup(db);
-    removeFinishedTracksOnStartup(db); // idempotent
-
-    expect(listQueue(db, roomId).map((q) => q.queueItemId)).toEqual([b.queueItemId, c.queueItemId]);
-    expect(listQueue(db, drained)).toEqual([]);
-    expect(a.queueItemId).not.toBe(b.queueItemId);
+    expect(listQueue(db, roomId).map((q) => q.queueItemId)).toEqual([first.queueItemId, second.queueItemId]);
+    expect(getCurrentPlayback(db, roomId)?.queueItemId).toBe(second.queueItemId);
   });
 
   it("advancing when nothing is playing is a no-op", () => {

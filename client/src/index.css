@@ -143,7 +143,7 @@ button {
 
 /* The player itself is always rendered above this grid (CLAUDE.md: keep it
    visible even with no room joined). Inside the grid, the remaining
-   hierarchy is vote > DJ+listeners > queue(+tokens) > reactions. Desktop
+   hierarchy is vote > DJ+listeners > queue > reactions. Desktop
    arranges these into two columns via grid-template-areas; collapsing to a
    single-column `grid-template-areas` list at the mobile breakpoint
    reproduces the exact same priority order top-to-bottom, independent of DOM
@@ -482,33 +482,14 @@ form {
   font-weight: 800;
 }
 
-/* ============================================================ tokens */
 
-.token-row {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-}
 
-.token-pip {
-  width: 0.9rem;
-  height: 0.9rem;
-  border-radius: 50%;
-  border: 2px solid var(--ink);
-}
-
-.token-pip--filled {
-  background: var(--candy-pink);
-}
-
-.token-pip--empty {
-  background: transparent;
-  opacity: 0.4;
-}
 
 /* ============================================================= queue */
 
 .queue-list {
+  /* Rows' offsetTop is measured from here (see App.tsx's queue anchoring). */
+  position: relative;
   list-style: none;
   margin: 0;
   padding: 0;
@@ -542,6 +523,25 @@ form {
   cursor: default;
 }
 
+/* Already played: kept above the current track as history. It can only
+   move down — past the current track, to play again. */
+.queue-item--history {
+  opacity: 0.6;
+  border-style: dashed;
+}
+
+.queue-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin-bottom: 0.9rem;
+}
+
+.queue-heading h2 {
+  margin: 0;
+}
+
 .queue-item-title {
   flex: 1 1 12rem;
   min-width: 0;
@@ -550,14 +550,6 @@ form {
   overflow-wrap: anywhere;
 }
 
-.queue-drop-target {
-  border: var(--border-w) dashed var(--ink-soft);
-  border-radius: var(--radius-md);
-  padding: 0.6rem 0.8rem;
-  text-align: center;
-  font-size: 0.85rem;
-  color: var(--ink-soft);
-}
 
 /* ============================================================ voting */
 

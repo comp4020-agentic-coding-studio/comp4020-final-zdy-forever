@@ -347,21 +347,46 @@ describe("queue", () => {
       });
 
       it("refuses to move an upcoming track in front of the playing one", () => {
-        expect(previewReorderQueue(db, roomId, b, a)).toBe("not-upcoming");
-        expect(reorderQueueItem(db, roomId, b, a)).toEqual({ reordered: false, reason: "not-upcoming" });
+        expect(previewReorderQueue(db, roomId, b, a)).toBe("not-allowed");
+        expect(reorderQueueItem(db, roomId, b, a)).toEqual({ reordered: false, reason: "not-allowed" });
         expect(playedOrder()).toEqual([a, b, c]);
       });
 
       it("refuses to move the playing track itself", () => {
-        expect(reorderQueueItem(db, roomId, a, c)).toEqual({ reordered: false, reason: "not-upcoming" });
-        expect(reorderQueueItem(db, roomId, a, null)).toEqual({ reordered: false, reason: "not-upcoming" });
+        expect(reorderQueueItem(db, roomId, a, c)).toEqual({ reordered: false, reason: "not-allowed" });
+        expect(reorderQueueItem(db, roomId, a, null)).toEqual({ reordered: false, reason: "not-allowed" });
         expect(playedOrder()).toEqual([a, b, c]);
       });
 
-      it("has nothing left of a finished track to move: it's gone from the queue", () => {
-        advanceToNextTrack(db, roomId); // a finished: [b (playing), c]
-        expect(listQueue(db, roomId).map((i) => i.queueItemId)).toEqual([b, c]);
-        expect(reorderQueueItem(db, roomId, a, null)).toEqual({ reordered: false, reason: "not-found" });
+      // Finished tracks stay above the current one as history; the way
+      // back is down, past the current track, to play again.
+      it("keeps a finished track as history above the current one", () => {
+        advanceToNextTrack(db, roomId); // a finished: [a (history), b (playing), c]
+        expect(listQueue(db, roomId).map((i) => i.queueItemId)).toEqual([a, b, c]);
+      });
+
+      it("moves a history track down past the playing one, where it plays again", () => {
+        advanceToNextTrack(db, roomId); // [a (history), b (playing), c]
+
+        expect(reorderQueueItem(db, roomId, a, c).reordered).toBe(true); // right after b
+        expect(listQueue(db, roomId).map((i) => i.queueItemId)).toEqual([b, a, c]);
+        expect(getNextTrack(db, roomId)?.queueItemId).toBe(a);
+        expect(playedOrder()).toEqual([b, a, c]);
+      });
+
+      it("moves a history track to the very end, to play last", () => {
+        advanceToNextTrack(db, roomId);
+        expect(reorderQueueItem(db, roomId, a, null).reordered).toBe(true);
+        expect(playedOrder()).toEqual([b, c, a]);
+      });
+
+      it("never moves a history track up", () => {
+        advanceToNextTrack(db, roomId);
+        advanceToNextTrack(db, roomId); // [a, b (history), c (playing)]
+        expect(reorderQueueItem(db, roomId, b, a)).toEqual({ reordered: false, reason: "not-allowed" });
+        // Down within history is still down: harmless, and allowed.
+        expect(reorderQueueItem(db, roomId, a, c).reordered).toBe(true);
+        expect(listQueue(db, roomId).map((i) => i.queueItemId)).toEqual([b, a, c]);
       });
 
       it("reorders freely among the tracks still to come, and they then play in that order", () => {

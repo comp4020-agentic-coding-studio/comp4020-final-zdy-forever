@@ -25,7 +25,6 @@ import {
   reorderQueueItem,
 } from "./queue.ts";
 import { broadcastReactionHistory } from "./reactions.ts";
-import { consumeReorderToken, getReorderTokenBalance } from "./reorderTokenStore.ts";
 import { touchRoomActivity } from "./rooms.ts";
 
 // Wires the pure voting engine (shared/src/voting.ts) to real playback/queue
@@ -44,11 +43,10 @@ export type { ProposalBroadcast };
 // currently-playing queue item (see the "Current-track removal" comment on
 // requestPlaybackProposal below), a REORDER_QUEUE drag that would produce no
 // real change (re-verified right now, before ever opening a vote over it),
-// one that would move a track that isn't still to come (or in front of the
-// playing one), and a REORDER_QUEUE request from an account with no reorder
-// tokens left — a client is expected to distinguish all of these from an
-// ordinary validation error.
-export type ProposalRequestErrorCode = "NOT_CURRENT_DJ" | "IS_CURRENT_TRACK" | "NO_OP" | "NOT_UPCOMING" | "NO_REORDER_TOKENS";
+// and one that would put a track somewhere it may not go (see queue.ts's
+// placementAllowed) — a client is expected to distinguish all of these from
+// an ordinary validation error.
+export type ProposalRequestErrorCode = "NOT_CURRENT_DJ" | "IS_CURRENT_TRACK" | "NO_OP" | "MOVE_NOT_ALLOWED";
 
 export type ProposalOutcome =
   | { ok: true; proposal: Proposal }
@@ -204,26 +202,14 @@ export class ProposalManager {
   }
 
   // REORDER_QUEUE is queue-kind, like REMOVE_QUEUE_ITEM — it never requires
-  // anything currently playing. Two request-time gates exist purely to avoid
-  // spending a 15-second vote (and to give the requester an immediate, typed
-  // reason) on an outcome execution time would reject for free anyway:
-  //
-  // - previewReorderQueue re-verifies, right now, that this drag would
-  //   actually change the order of the tracks still to come — a drag dropped
-  //   back onto its original position (or its own current successor) is
-  //   rejected as NO_OP, and one touching the playing track, an
-  //   already-played one, or landing in front of the playing track as
-  //   NOT_UPCOMING (it would drop that track from what ever plays), rather
-  //   than opening a vote that could only resolve as a no-op (CLAUDE.md:
-  //   "Failed, stale or no-op reorder attempts cost nothing" — cheapest to
-  //   honor by never starting one).
-  // - getReorderTokenBalance rejects a proposer already at 0 tokens. Since
-  //   only one proposal can be open per room at a time and the vote window
-  //   is at most 15 seconds, and regeneration only ever adds tokens, a
-  //   balance found positive here is guaranteed still positive at resolution
-  //   time in this same room — so gating here is equivalent to gating at
-  //   execution time, but fails fast with a typed reason instead of silently
-  //   letting a vote pass and then doing nothing.
+  // anything currently playing. There is no limit on how often anyone may
+  // reorder (docs/adr/0005): the vote is the only gate. previewReorderQueue
+  // re-verifies, right now, that this drag would actually change the queue
+  // order — a drag dropped back onto its original position (or its own
+  // current successor) is rejected as NO_OP — and that the track may go
+  // there at all (MOVE_NOT_ALLOWED: see queue.ts's placementAllowed), rather
+  // than spending a 15-second vote on an outcome that could only resolve as
+  // a no-op.
   private requestReorderQueue(
     io: Server,
     db: DatabaseSync,
@@ -246,20 +232,16 @@ export class ProposalManager {
     }
 
     const rejection = previewReorderQueue(db, roomId, queueItemId, beforeQueueItemId);
-    if (rejection === "not-upcoming") {
+    if (rejection === "not-allowed") {
       return {
         ok: false,
-        error: "only tracks still to come can be moved, and only among themselves",
-        code: "NOT_UPCOMING",
+        error:
+          "the playing track can't move, a played one can only move down, and one still to come can't move above the playing track",
+        code: "MOVE_NOT_ALLOWED",
       };
     }
     if (rejection) {
       return { ok: false, error: "this would not change the queue order", code: "NO_OP" };
-    }
-
-    const balance = getReorderTokenBalance(db, roomId, proposerAccountId, Date.now());
-    if (balance.tokens < 1) {
-      return { ok: false, error: "no reorder tokens remaining", code: "NO_REORDER_TOKENS" };
     }
 
     const reference: ProposalReference = { kind: "queue", queueRevision: getQueueRevision(db, roomId) };
@@ -314,7 +296,7 @@ export class ProposalManager {
     // votes it needs, so a room left with one person — after a server
     // restart paused it, say — could never be played, skipped or reordered
     // again. Everything checked before this point still holds (DJ-only Seek,
-    // reorder tokens, ...), and it's applied exactly like a vote that passed.
+    // no-op reorders, ...), and it's applied exactly like a vote that passed.
     if (options.presentCount === 1) {
       logAction(
         db,
@@ -451,8 +433,6 @@ export class ProposalManager {
     this.invalidateActive(io, roomId);
     const next = advanceToNextTrack(db, roomId);
     io.to(roomId).emit("playback:update", next);
-    // The track that just ended has left the queue (see advanceToNextTrack).
-    io.to(roomId).emit("queue:itemRemoved", { queueItemId: current.queueItemId });
     if (next) broadcastReactionHistory(io, db, roomId, next.videoId);
     logAction(db, {
       action: "PLAYBACK_CHANGE",
@@ -582,12 +562,9 @@ export class ProposalManager {
       // advanceToNextTrack returning null just means the queue is now empty
       // (playback stops) — that is a successful skip, not a failure to
       // apply, so applied is unconditionally true once we get this far.
-      // The skipped track leaves the queue, just as a finished one does.
-      const skipped = getCurrentPlayback(db, roomId)?.queueItemId;
       const next = advanceToNextTrack(db, roomId);
       this.broadcast(io, roomId, resolved, true);
       io.to(roomId).emit("playback:update", next);
-      if (skipped) io.to(roomId).emit("queue:itemRemoved", { queueItemId: skipped });
       if (next) broadcastReactionHistory(io, db, roomId, next.videoId);
       // "successful shared playback action" is meaningful activity
       // (CLAUDE.md's Rooms section) — a successful SKIP unconditionally.
@@ -669,15 +646,6 @@ export class ProposalManager {
           revision: getQueueRevision(db, roomId),
           detail: queueItemId,
         });
-        // CLAUDE.md: "Consume one token only after a reorder vote passes and
-        // a real reorder succeeds" — result.reordered === true is exactly
-        // that condition (a stale/failed/no-op reorder never reaches here at
-        // all, see the staleness check and reorderQueueItem's own no-op
-        // detection above). Broadcast the proposer's new balance regardless
-        // of consumeReorderToken's own ok/fail so every client's displayed
-        // balance for this account stays in sync either way.
-        const spend = consumeReorderToken(db, roomId, resolved.proposer, Date.now());
-        io.to(roomId).emit("reorderTokens:update", { accountId: resolved.proposer, balance: spend.balance });
       }
       return;
     }

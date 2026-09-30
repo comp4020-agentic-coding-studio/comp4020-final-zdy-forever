@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import type { QueueItem, YoutubeVideoMetadata } from "../../shared/src/types.ts";
+import { placementAllowed } from "../../shared/src/queueRules.ts";
 import { parseYouTubeVideoId } from "../../shared/src/youtube.ts";
 import { logAction } from "./logging.ts";
 import { touchRoomActivity } from "./rooms.ts";
@@ -118,21 +119,7 @@ export function planReorder(order: string[], queueItemId: string, beforeQueueIte
   return unchanged ? null : next;
 }
 
-// The tail of `order` a reorder may touch: every item after the one playing
-// now. What plays next is always the first item positioned after the current
-// one (see playback.ts's getNextTrack), so moving the current item, an
-// already-played one, or an upcoming one in front of the current item used
-// to silently drop it from what would ever play — while still costing a
-// token. With nothing playing it's the whole queue, matching getNextTrack's
-// own "whatever would start now" view.
-function upcomingOf(db: DatabaseSync, roomId: string, order: string[]): string[] {
-  const current = db.prepare("SELECT queueItemId FROM room_playback WHERE roomId = ?").get(roomId) as
-    | { queueItemId: string }
-    | undefined;
-  return current ? order.slice(order.indexOf(current.queueItemId) + 1) : order;
-}
-
-export type ReorderRejection = "not-found" | "invalid-target" | "not-upcoming" | "no-op";
+export type ReorderRejection = "not-found" | "invalid-target" | "not-allowed" | "no-op";
 
 // The full new order a drag would produce, or why it wouldn't produce one.
 // Shared by the read-only preview and the real write so the two can never
@@ -144,17 +131,19 @@ function planQueueReorder(
   beforeQueueItemId: string | null,
 ): { next: string[] } | { rejection: ReorderRejection } {
   const order = getQueueOrder(db, roomId);
-  if (!order.includes(queueItemId)) return { rejection: "not-found" };
-  if (beforeQueueItemId !== null && !order.includes(beforeQueueItemId)) return { rejection: "invalid-target" };
+  const from = order.indexOf(queueItemId);
+  if (from === -1) return { rejection: "not-found" };
+  const to = beforeQueueItemId === null ? order.length : order.indexOf(beforeQueueItemId);
+  if (to === -1) return { rejection: "invalid-target" };
 
-  const upcoming = upcomingOf(db, roomId, order);
-  if (!upcoming.includes(queueItemId) || (beforeQueueItemId !== null && !upcoming.includes(beforeQueueItemId))) {
-    return { rejection: "not-upcoming" };
-  }
+  const current = db.prepare("SELECT queueItemId FROM room_playback WHERE roomId = ?").get(roomId) as
+    | { queueItemId: string }
+    | undefined;
+  const currentIndex = current ? order.indexOf(current.queueItemId) : -1;
+  if (!placementAllowed(currentIndex, from, to)) return { rejection: "not-allowed" };
 
-  const planned = planReorder(upcoming, queueItemId, beforeQueueItemId);
-  if (!planned) return { rejection: "no-op" };
-  return { next: [...order.slice(0, order.length - upcoming.length), ...planned] };
+  const next = planReorder(order, queueItemId, beforeQueueItemId);
+  return next ? { next } : { rejection: "no-op" };
 }
 
 // A read-only preview of why a drag would not produce a genuine reorder, or

@@ -1,5 +1,5 @@
-// Pure, framework-free fixed-window rate limiting, mirroring
-// shared/src/reorderTokens.ts's style: every function does ms arithmetic
+// Pure, framework-free fixed-window rate limiting, in the same style as
+// shared/src/voting.ts: every function does ms arithmetic
 // against a caller-supplied `nowMs` and never reads the clock itself, so the
 // whole thing is trivially testable without fake timers or real waiting.
 //
@@ -15,8 +15,7 @@ export interface RateLimitConfig {
 
 // count is how many calls have been allowed since windowStartMs — never a
 // live "now" value. A window that has fully elapsed by nowMs is simply
-// replaced with a fresh one (see checkRateLimit), the same way
-// reorderTokens.ts's regen resets its anchor once already at the cap.
+// replaced with a fresh one (see checkRateLimit).
 export interface RateLimitState {
   windowStartMs: number;
   count: number;

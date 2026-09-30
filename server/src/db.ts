@@ -152,25 +152,9 @@ export function openDatabase(dbPath: string): DatabaseSync {
     db.exec("ALTER TABLE room_playback ADD COLUMN revision INTEGER NOT NULL DEFAULT 1");
   }
 
-  // One row per (roomId, accountId) that has ever touched a reorder token in
-  // that room — see shared/src/reorderTokens.ts and docs/adr/0001-reorder-
-  // token-scope.md for why balances are scoped per room rather than per
-  // account globally. tokens/anchorMs is that pair's last-persisted
-  // (balance, anchor) snapshot: tokens is the balance as of anchorMs, not a
-  // live value, and every read recomputes forward from it against the
-  // current clock (server/src/reorderTokenStore.ts) rather than trusting any
-  // in-memory timer. No row at all means "never spent, still at the
-  // 5-token cap" — the default is synthesized on read, not pre-inserted for
-  // every participant.
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS reorder_tokens (
-      roomId    TEXT NOT NULL REFERENCES rooms(roomId),
-      accountId TEXT NOT NULL REFERENCES accounts(accountId),
-      tokens    INTEGER NOT NULL,
-      anchorMs  INTEGER NOT NULL,
-      PRIMARY KEY (roomId, accountId)
-    )
-  `);
+  // (A reorder_tokens table may still exist in an older database: reorders
+  // used to be rationed by tokens, which docs/adr/0005 removed. Nothing reads
+  // or writes it any more.)
 
   // One row per recorded reaction (CLAUDE.md's Reactions section). displayName
   // is denormalized here (rather than looked up live from accounts, as the DJ

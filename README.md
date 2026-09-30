@@ -72,7 +72,7 @@ because it's the only path that respects YouTube's own terms.
 
 The room cap, vote thresholds, revision-checked proposals, and track-scoped
 DJ lookup are enforced by code and covered by tests (`server/src/*.test.ts`;
-`docs/adr/0001-reorder-token-scope.md` records one such decision in detail).
+`docs/adr/` records the decisions behind them in detail).
 Whether a 12-person cap, a 15-second window, or timestamped reactions
 actually *produce* the feeling of listening together is not something this
 repository can assert for itself — that judgement belongs to the people

@@ -13,7 +13,6 @@ import type {
   LobbyRoom,
   QueueItem,
   RegisterRequest,
-  ReorderTokenBalance,
   Room,
   RoomPlaybackSnapshot,
 } from "../../shared/src/types.ts";
@@ -26,13 +25,11 @@ import {
   getNextTrack,
   recordServerAlive,
   recoverPlaybackOnStartup,
-  removeFinishedTracksOnStartup,
   SERVER_ALIVE_INTERVAL_MS,
 } from "./playback.ts";
 import { addTrack, InvalidTrackError, listQueue } from "./queue.ts";
 import { broadcastReactionHistory } from "./reactions.ts";
 import { attachRealtime } from "./realtime.ts";
-import { getReorderTokenBalance } from "./reorderTokenStore.ts";
 import {
   createRoom,
   getActiveRoomByCode,
@@ -58,8 +55,6 @@ const db = openDatabase(databasePath);
 // recover at its last saved position as PAUSED, never extrapolated forward
 // through the unknown downtime. Must run before any socket can connect.
 recoverPlaybackOnStartup(db);
-// Finished tracks leave the queue; clear out any left from before they did.
-removeFinishedTracksOnStartup(db);
 
 // Keeps server_liveness current so the next restart knows how far each
 // playing track had got (see recoverPlaybackOnStartup). Failing to record it
@@ -334,24 +329,6 @@ app.get("/api/rooms/:roomId/playback", (req, res) => {
     next: getNextTrack(db, roomId),
   };
   res.json(snapshot);
-});
-
-// One account's server-authoritative reorder-token balance in this room (see
-// CLAUDE.md's Reorder section and shared/src/reorderTokens.ts) — a plain
-// query, never something a client tracks or reports itself; the client
-// fetches it on every (re)join, and reorderTokens:update keeps it current.
-app.get("/api/rooms/:roomId/reorder-tokens/:accountId", (req, res) => {
-  const { roomId, accountId } = req.params;
-  if (!getRoomById(db, roomId)) {
-    res.status(404).json({ error: "room not found" });
-    return;
-  }
-  if (!getAccountById(db, accountId)) {
-    res.status(400).json({ error: "unknown accountId" });
-    return;
-  }
-  const balance: ReorderTokenBalance = getReorderTokenBalance(db, roomId, accountId);
-  res.json(balance);
 });
 
 // There is no search: YouTube offers none without the Data API v3, which

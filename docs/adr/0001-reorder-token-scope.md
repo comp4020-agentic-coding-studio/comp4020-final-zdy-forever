@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted.
+Superseded by ADR 0005: reorders are no longer rationed by tokens at all.
 
 ## Context
 
