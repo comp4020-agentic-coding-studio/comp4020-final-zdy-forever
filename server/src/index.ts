@@ -19,6 +19,7 @@ import type {
 import { getAccountByClientId, getAccountById, registerAccount, renameAccount } from "./accounts.ts";
 import { openDatabase } from "./db.ts";
 import { handleYoutubeError } from "./httpErrors.ts";
+import { listRecentLogs, withAccountDisplayNames } from "./logging.ts";
 import {
   ensureCurrentTrack,
   getCurrentPlayback,
@@ -86,14 +87,26 @@ app.get("/api/health", (_req, res) => {
 // only that browser holds. An accountId alone is no proof — it's public,
 // broadcast to a whole room via presence, queue addedBy and chat — and
 // trusting one used to let anyone add tracks (becoming DJ) or join rooms as
-// someone else. Responds 401 and returns null when the pair doesn't match.
+// someone else.
+function matchesRegisteredAccount(accountId: string, clientId: string): boolean {
+  return Boolean(accountId && clientId && getAccountByClientId(db, clientId)?.accountId === accountId);
+}
+
+// For a POST/PUT body. Responds 401 and returns null when the pair doesn't match.
 function authenticate(req: express.Request, res: express.Response): string | null {
   const body = req.body as { accountId?: unknown; clientId?: unknown };
   const accountId = typeof body.accountId === "string" ? body.accountId.trim() : "";
   const clientId = typeof body.clientId === "string" ? body.clientId : "";
-  if (accountId && clientId && getAccountByClientId(db, clientId)?.accountId === accountId) {
-    return accountId;
-  }
+  if (matchesRegisteredAccount(accountId, clientId)) return accountId;
+  res.status(401).json({ error: "accountId and clientId must match a registered account" });
+  return null;
+}
+
+// Same check, for a GET's query string instead of a body.
+function authenticateQuery(req: express.Request, res: express.Response): string | null {
+  const accountId = typeof req.query.accountId === "string" ? req.query.accountId.trim() : "";
+  const clientId = typeof req.query.clientId === "string" ? req.query.clientId : "";
+  if (matchesRegisteredAccount(accountId, clientId)) return accountId;
   res.status(401).json({ error: "accountId and clientId must match a registered account" });
   return null;
 }
@@ -326,6 +339,28 @@ app.get("/api/rooms/:roomId/playback", (req, res) => {
     next: getNextTrack(db, roomId),
   };
   res.json(snapshot);
+});
+
+// A room's recent activity feed — "what's happening right now" (the
+// observability crit asks for; see server/src/logging.ts). Requires being a
+// presently-admitted member of the room, the same bar as chat (CLAUDE.md:
+// "Only authenticated members currently in the room may send or receive
+// messages"), not queue/playback's open-by-roomId read above: a log row
+// names who did what (joins, votes, DJ handoff) far more precisely than a
+// queue item's addedBy ever does. accountId is decorated with the account's
+// current displayName for display only — see withAccountDisplayNames's own
+// doc comment for why that can never replace accountId as identity.
+app.get("/api/rooms/:roomId/logs", (req, res) => {
+  const accountId = authenticateQuery(req, res);
+  if (!accountId) return;
+  const { roomId } = req.params;
+  if (!getRoomById(db, roomId) || !presence.isPresent(roomId, accountId)) {
+    // Not-present reads as not-found, the same as the queue route above, so
+    // this can't be used to learn that a private room exists.
+    res.status(404).json({ error: "room not found — join it before viewing its logs" });
+    return;
+  }
+  res.json(withAccountDisplayNames(db, listRecentLogs(db, { roomId })));
 });
 
 // There is no search: YouTube offers none without the Data API v3, which

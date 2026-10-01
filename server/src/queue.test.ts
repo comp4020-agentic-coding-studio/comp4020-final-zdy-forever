@@ -148,25 +148,33 @@ describe("queue", () => {
     expect(item.title).toBe(SONG_A.title);
   });
 
-  it("rejects a video the resolver reports as not found", async () => {
+  it("rejects a video the resolver reports as not found, and logs why", async () => {
     const resolveMetadata = fakeMetadataFor({});
 
     await expect(addTrack(db, roomId, accountId, "zzzzzzzzzzz", { resolveMetadata })).rejects.toThrow(
       InvalidTrackError,
     );
     expect(listQueue(db, roomId)).toEqual([]);
+    const row = db.prepare("SELECT result, detail FROM logs WHERE action = 'TRACK_ADD'").get() as
+      | { result: string; detail: string }
+      | undefined;
+    expect(row).toEqual({ result: "not-found", detail: "zzzzzzzzzzz" });
   });
 
-  it("rejects a video that isn't embeddable", async () => {
+  it("rejects a video that isn't embeddable, and logs why", async () => {
     const resolveMetadata = fakeMetadataFor({ [PRIVATE_SONG.videoId]: PRIVATE_SONG });
 
     await expect(
       addTrack(db, roomId, accountId, PRIVATE_SONG.videoId, { resolveMetadata }),
     ).rejects.toThrow(InvalidTrackError);
     expect(listQueue(db, roomId)).toEqual([]);
+    const row = db.prepare("SELECT result, detail FROM logs WHERE action = 'TRACK_ADD'").get() as
+      | { result: string; detail: string }
+      | undefined;
+    expect(row).toEqual({ result: "not-embeddable", detail: PRIVATE_SONG.videoId });
   });
 
-  it("rejects input that isn't a recognizable YouTube URL or videoId, without ever calling the resolver", async () => {
+  it("rejects input that isn't a recognizable YouTube URL or videoId, without ever calling the resolver, and logs why", async () => {
     let called = false;
     const resolveMetadata = async () => {
       called = true;
@@ -178,6 +186,10 @@ describe("queue", () => {
     );
     expect(called).toBe(false);
     expect(listQueue(db, roomId)).toEqual([]);
+    const row = db.prepare("SELECT result, detail FROM logs WHERE action = 'TRACK_ADD'").get() as
+      | { result: string; detail: string }
+      | undefined;
+    expect(row).toEqual({ result: "invalid-url", detail: "not a url at all" });
   });
 
   it("assigns distinct, non-sequential queueItemIds to tracks added simultaneously, without overwriting either", async () => {

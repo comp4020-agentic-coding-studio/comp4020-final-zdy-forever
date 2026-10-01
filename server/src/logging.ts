@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import { getAccountById } from "./accounts.ts";
 
 // Structured server-side observability (see CLAUDE.md's request: "Add
 // structured server-side observability"). Exactly these 14 action kinds are
@@ -97,4 +98,63 @@ export function logAction(db: DatabaseSync, input: LogEventInput, nowMs: number 
   }
 
   console.log(JSON.stringify(event));
+}
+
+function rowToLogEvent(row: unknown): LogEvent {
+  const r = row as {
+    timestamp: string;
+    action: LogAction;
+    result: string;
+    roomId: string | null;
+    accountId: string | null;
+    proposalId: string | null;
+    playbackId: string | null;
+    revision: number | null;
+    detail: string | null;
+  };
+  return {
+    timestamp: r.timestamp,
+    action: r.action,
+    result: r.result,
+    ...(r.roomId !== null && { roomId: r.roomId }),
+    ...(r.accountId !== null && { accountId: r.accountId }),
+    ...(r.proposalId !== null && { proposalId: r.proposalId }),
+    ...(r.playbackId !== null && { playbackId: r.playbackId }),
+    ...(r.revision !== null && { revision: r.revision }),
+    ...(r.detail !== null && { detail: r.detail }),
+  };
+}
+
+// Reads back the live feed itself — newest first, optionally narrowed to one
+// room — for a "what's happening right now" view to render. Prunes first so
+// a caller never sees a row older than LOG_RETENTION_MS.
+export function listRecentLogs(db: DatabaseSync, options: { roomId?: string; nowMs?: number } = {}): LogEvent[] {
+  const nowMs = options.nowMs ?? Date.now();
+  pruneOldLogs(db, nowMs);
+  const rows = options.roomId
+    ? db.prepare(`SELECT ${LOG_COLUMNS} FROM logs WHERE roomId = ? ORDER BY id DESC`).all(options.roomId)
+    : db.prepare(`SELECT ${LOG_COLUMNS} FROM logs ORDER BY id DESC`).all();
+  return rows.map(rowToLogEvent);
+}
+
+export interface LogEventView extends LogEvent {
+  accountDisplayName: string | null;
+}
+
+// Decorates each row with its account's *current* displayName, purely for a
+// human reading the feed: a read-only join done at render time, never stored
+// or logged. displayName may duplicate across accounts (CLAUDE.md's Identity
+// section — "displayName: may duplicate"), so this can never replace
+// accountId as the row's real identity, only label it for display. A missing
+// accountId, or an account since deleted, resolves to null rather than
+// throwing.
+export function withAccountDisplayNames(db: DatabaseSync, events: LogEvent[]): LogEventView[] {
+  const cache = new Map<string, string | null>();
+  return events.map((event) => {
+    if (!event.accountId) return { ...event, accountDisplayName: null };
+    if (!cache.has(event.accountId)) {
+      cache.set(event.accountId, getAccountById(db, event.accountId)?.displayName ?? null);
+    }
+    return { ...event, accountDisplayName: cache.get(event.accountId) ?? null };
+  });
 }

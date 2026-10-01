@@ -15,6 +15,13 @@ async function post(path: string, body: unknown): Promise<{ status: number; body
   return { status: res.status, body: (await res.json()) as Record<string, unknown> };
 }
 
+async function get(path: string, query: Record<string, string>): Promise<{ status: number; body: unknown }> {
+  const url = new URL(path, baseUrl);
+  for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
+  const res = await fetch(url);
+  return { status: res.status, body: await res.json() };
+}
+
 async function register(displayName: string): Promise<{ accountId: string; clientId: string }> {
   const clientId = randomUUID();
   const { body } = await post("/api/register", { clientId, displayName });
@@ -58,6 +65,31 @@ describe("acting as an account over REST", () => {
 
     // Checked before the YouTube lookup, so this holds with or without an API key.
     const { status } = await post(`/api/rooms/${room.roomId}/queue`, { ...alice, input: "dQw4w9WgXcQ" });
+    expect(status).toBe(404);
+  });
+
+  it("requires the clientId that registered the account to read a room's logs too", async () => {
+    const alice = await register("Alice");
+    const mallory = await register("Mallory");
+    const room = await createRoom(alice, "PUBLIC");
+
+    const path = `/api/rooms/${room.roomId}/logs`;
+    expect((await get(path, { accountId: alice.accountId, clientId: mallory.clientId })).status).toBe(401);
+    expect((await get(path, { accountId: alice.accountId, clientId: "" })).status).toBe(401);
+  });
+
+  it("only lets someone in the room read its logs — creating it over REST alone isn't enough", async () => {
+    const alice = await register("Alice");
+    const room = await createRoom(alice, "PUBLIC");
+
+    const { status } = await get(`/api/rooms/${room.roomId}/logs`, alice);
+    expect(status).toBe(404);
+  });
+
+  it("answers the same not-found status for a room that never existed, so a logs probe can't reveal a private room", async () => {
+    const alice = await register("Alice");
+
+    const { status } = await get(`/api/rooms/${randomUUID()}/logs`, alice);
     expect(status).toBe(404);
   });
 });

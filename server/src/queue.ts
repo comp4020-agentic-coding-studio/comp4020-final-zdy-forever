@@ -225,11 +225,20 @@ export async function addTrack(
   const resolveMetadata = deps.resolveMetadata ?? defaultGetVideoMetadata;
 
   const videoId = parseYouTubeVideoId(input);
-  if (!videoId) throw new InvalidTrackError("not a recognizable YouTube video URL or videoId");
+  if (!videoId) {
+    logAction(db, { action: "TRACK_ADD", result: "invalid-url", roomId, accountId, detail: input.slice(0, 200) });
+    throw new InvalidTrackError("not a recognizable YouTube video URL or videoId");
+  }
 
   const metadata = await resolveMetadata(videoId);
-  if (!metadata) throw new InvalidTrackError("video not found");
-  if (!metadata.embeddable) throw new InvalidTrackError("video is not embeddable");
+  if (!metadata) {
+    logAction(db, { action: "TRACK_ADD", result: "not-found", roomId, accountId, detail: videoId });
+    throw new InvalidTrackError("video not found");
+  }
+  if (!metadata.embeddable) {
+    logAction(db, { action: "TRACK_ADD", result: "not-embeddable", roomId, accountId, detail: videoId });
+    throw new InvalidTrackError("video is not embeddable");
+  }
 
   const item: QueueItem = {
     queueItemId: randomUUID(),

@@ -3,8 +3,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { registerAccount } from "./accounts.ts";
 import { openDatabase } from "./db.ts";
-import { formatLogEvent, LOG_ACTIONS, LOG_RETENTION_MS, logAction } from "./logging.ts";
+import { formatLogEvent, listRecentLogs, LOG_ACTIONS, LOG_RETENTION_MS, logAction, withAccountDisplayNames } from "./logging.ts";
 
 describe("logging", () => {
   let dir: string;
@@ -162,6 +163,64 @@ describe("logging", () => {
 
       consoleErrorSpy.mockRestore();
       consoleLogSpy.mockRestore();
+    });
+  });
+
+  describe("listRecentLogs", () => {
+    it("returns a room's rows newest first, and never another room's", () => {
+      logAction(db, { action: "ROOM_CREATE", result: "ok", roomId: "room-1" }, Date.parse("2026-01-02T03:00:00.000Z"));
+      logAction(db, { action: "TRACK_ADD", result: "ok", roomId: "room-2" }, Date.parse("2026-01-02T03:00:01.000Z"));
+      logAction(db, { action: "ROOM_JOIN", result: "ok", roomId: "room-1" }, Date.parse("2026-01-02T03:00:02.000Z"));
+
+      const rows = listRecentLogs(db, { roomId: "room-1", nowMs: Date.parse("2026-01-02T03:00:02.000Z") });
+
+      expect(rows.map((r) => r.action)).toEqual(["ROOM_JOIN", "ROOM_CREATE"]);
+    });
+
+    it("prunes rows older than the retention window before reading them back", () => {
+      const nowMs = Date.parse("2026-01-02T03:20:00.000Z");
+      logAction(db, { action: "ROOM_CREATE", result: "ok", roomId: "room-1" }, nowMs - LOG_RETENTION_MS - 1000);
+
+      const rows = listRecentLogs(db, { nowMs });
+
+      expect(rows).toEqual([]);
+    });
+  });
+
+  describe("withAccountDisplayNames", () => {
+    it("decorates each event with its account's current displayName, without touching the stored event", () => {
+      const account = registerAccount(db, "client-1", "Ash");
+      const events = [formatLogEvent({ action: "CHAT_SEND", result: "ok", roomId: "room-1", accountId: account.accountId })];
+
+      const [decorated] = withAccountDisplayNames(db, events);
+
+      expect(decorated.accountDisplayName).toBe("Ash");
+      expect(decorated.accountId).toBe(account.accountId);
+    });
+
+    it("resolves to null, never throwing, for an event with no accountId or an unknown one", () => {
+      const events = [
+        formatLogEvent({ action: "ROOM_AUTO_CLOSE", result: "ok", roomId: "room-1" }),
+        formatLogEvent({ action: "CHAT_SEND", result: "ok", roomId: "room-1", accountId: "no-such-account" }),
+      ];
+
+      const decorated = withAccountDisplayNames(db, events);
+
+      expect(decorated.map((e) => e.accountDisplayName)).toEqual([null, null]);
+    });
+
+    it("two accounts sharing a displayName decorate identically — this labels, it never re-identifies", () => {
+      const a = registerAccount(db, "client-a", "Sam");
+      const b = registerAccount(db, "client-b", "Sam");
+      const events = [
+        formatLogEvent({ action: "CHAT_SEND", result: "ok", roomId: "room-1", accountId: a.accountId }),
+        formatLogEvent({ action: "CHAT_SEND", result: "ok", roomId: "room-1", accountId: b.accountId }),
+      ];
+
+      const decorated = withAccountDisplayNames(db, events);
+
+      expect(decorated.map((e) => e.accountDisplayName)).toEqual(["Sam", "Sam"]);
+      expect(decorated[0].accountId).not.toBe(decorated[1].accountId);
     });
   });
 });
