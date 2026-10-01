@@ -1,8 +1,8 @@
-# Echo Room
+# Watch YouTube Together
 
 ## Goal
 
-Echo Room is a persistent, real-time shared listening room for up to 12 users.
+Watch YouTube Together is a persistent, real-time shared listening room for up to 12 users.
 
 Product principle:
 
@@ -73,7 +73,8 @@ Maximum 12 users.
 
 Private codes must be checked for active collisions.
 
-At room creation, users can enable/disable automatic closure after 2 hours of inactivity.
+Every room automatically closes after 2 hours of inactivity. This is mandatory,
+including legacy rooms; there is no creation-form toggle or client opt-out.
 
 Heartbeat/network traffic does not count as activity.
 
@@ -82,6 +83,13 @@ Heartbeat/network traffic does not count as activity.
 The server is authoritative for all shared state.
 
 Clients send intentions, not complete state.
+
+Route playback input through the room controls. Lock direct YouTube input by
+default. A listener may temporarily unlock the native menu for local quality
+and subtitle settings; Done locks input and reapplies the latest room anchor.
+Never broadcast these viewing preferences. Keep playback speed at 1x. When
+room playback is null (including an exhausted queue), reject local playback.
+See `docs/adr/0007-local-player-settings.md` for the official API limitations.
 
 Example:
 
@@ -101,7 +109,7 @@ Persist:
 - accounts
 - queue and who added each item
 - current playback state
-- reactions/history
+- room chat messages (delete when the room closes)
 
 Do not persist socket IDs or transient UI state.
 
@@ -117,7 +125,23 @@ Concurrent additions must never overwrite each other.
 
 Finished tracks (played to the end, or skipped) stay in the queue as history, above the current track. The queue view shows the current track as its first row; history is reached by scrolling up.
 
-The DJ for the current track is the account that added that queue item.
+Once playback is empty, listeners may replay from any retained queue item.
+Use a REPLAY_QUEUE_ITEM proposal (the usual sole-listener exception applies),
+checking the queue revision and that playback is still empty at execution.
+Start a fresh playbackId at zero on that item and follow the existing order;
+do not duplicate, delete or reorder history. Once the queue finishes, show
+"restart here" directly in place of each row's move/delete controls and disable
+dragging. Restore the normal controls when authoritative playback restarts.
+
+The DJ initially comes from the account that added the current queue item.
+On departure, offer a 10-second choice of present successors, then choose one
+randomly on the server. With zero/one successor, leave/transfer immediately
+without a dialog. Another active tab of the same account retains the role.
+Unexpected disconnects always get a 10-second reconnect grace period, even
+with only one successor; only an explicit Leave may transfer immediately.
+Store a per-playback DJ override, without changing queue attribution or playback
+position; advance the revision so old DJ seek votes cannot apply after transfer.
+New tracks start with their adder, falling back to a present member if absent.
 
 DJ is a logical role; the DJ browser is never authoritative.
 
@@ -136,11 +160,14 @@ These do not:
 
 - Add song
 - Join/leave
-- Reaction
+- Chat message
 
 Voting rules:
 
 - 15-second window
+- Resolve immediately once every currently present account has voted, whether
+  YES or NO; otherwise wait for the deadline. Keep majority, quorum and stale
+  reference checks, and cancel the timer after early resolution.
 - YES / NO
 - no response = ABSTAIN
 - ABSTAIN excluded from denominator
@@ -185,29 +212,28 @@ Clients calculate expected playback position from the server anchor.
 
 Tolerate small drift and correct significant drift using the official YouTube player API.
 
+Never seek or reload a playing video beyond its known duration. Hold a locally
+finished playback until the server changes its playbackId or revision; an old
+PLAYING anchor may remain while end reports are collected. Report the end once
+per connection/anchor, and ignore state events from the previous video during
+track transitions.
+
 Synchronization means convergence, not sample-perfect audio.
 
 Reconnect and late join must start from an authoritative room snapshot.
 
-## Reactions
+## Room chat
 
-Use a small fixed reaction set such as:
+Use room-scoped plain-text chat instead of reactions or historical echoes.
 
-❤️ 🔥 😭 ✨
-
-Store reaction:
-
-- videoId
-- account
-- position
-- reaction
-- date/time
-
-Live reactions appear immediately.
-
-When the same video is played again, historical reactions may reappear near their original timestamp with their original date.
-
-Do not add text chat.
+- Only authenticated members currently in the room may send or receive messages.
+- Derive account, display name, room and timestamp on the server.
+- Chat works even when no track is playing and never requires voting.
+- Messages survive refresh, reconnect and server restart while the room is open.
+- Delete chat records atomically when the room closes; clear connected clients too.
+- Sending a message counts as meaningful room activity; reading does not.
+- Validate text length and rate-limit sends per room/account.
+- Never put message text in server logs.
 
 ## UI
 
@@ -230,9 +256,14 @@ Support desktop and mobile.
 
 Keep the YouTube player visible.
 
-Core hierarchy:
-
-current track → vote → DJ/presence → queue → reactions.
+Room information stays at the top; its member-count button opens DJ/listener
+details in a dismissible popover. Wide screens put vote/chat on the left,
+the player in the center, and add-link/queue on the right.
+When only one sidebar fits, prioritize vote/chat; place add-link/queue below
+the player. Small screens stack these sections without remounting the player.
+Wide desktop rooms fit the viewport with aligned player/chat/queue card bottoms.
+Scale using both viewport dimensions, preserve the video's aspect ratio, and
+scroll chat/queue contents inside their panels rather than growing the page.
 
 ## Reliability
 

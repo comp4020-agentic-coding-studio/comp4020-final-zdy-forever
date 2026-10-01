@@ -19,11 +19,11 @@ function randomSixDigitCode(): string {
 }
 
 // Pure: whether `room` is due to auto-close as of nowMs, given only its own
-// autoCloseEnabled flag and lastMeaningfulActivityAt — never itself mutates
+// lastMeaningfulActivityAt — never itself mutates
 // anything, so it's the seam fake-clock tests probe directly. An
 // already-closed room is never "due" (closing is one-way).
 export function isAutoCloseDue(room: Room, nowMs: number): boolean {
-  if (room.closed || !room.autoCloseEnabled) return false;
+  if (room.closed) return false;
   return nowMs - Date.parse(room.lastMeaningfulActivityAt) >= AUTO_CLOSE_INACTIVITY_MS;
 }
 
@@ -33,9 +33,9 @@ export function isAutoCloseDue(room: Room, nowMs: number): boolean {
 // the server has been running for days or was just restarted a moment ago.
 // Called opportunistically (see getRoomById/getActiveRoomByCode/
 // listPublicLobby below) rather than on any schedule of its own.
-function sweepInactiveRooms(db: DatabaseSync, nowMs: number): void {
+export function sweepInactiveRooms(db: DatabaseSync, nowMs: number): void {
   const candidates = db
-    .prepare("SELECT roomId, lastMeaningfulActivityAt FROM rooms WHERE closed = 0 AND autoCloseEnabled = 1")
+    .prepare("SELECT roomId, lastMeaningfulActivityAt FROM rooms WHERE closed = 0")
     .all() as { roomId: string; lastMeaningfulActivityAt: string }[];
   if (candidates.length === 0) return;
 
@@ -54,7 +54,7 @@ function sweepInactiveRooms(db: DatabaseSync, nowMs: number): void {
 // Bumps a room's lastMeaningfulActivityAt to nowMs — the only thing that
 // keeps an auto-close-enabled room open. Callers are exactly CLAUDE.md's
 // meaningful-activity list (join, track add, proposal create, vote,
-// successful shared playback action, successful reorder, reaction) — never
+// successful shared playback action, successful reorder, chat message) — never
 // heartbeat/presence/polling/background traffic. A no-op against an
 // already-closed room: activity can never reopen a closed room.
 export function touchRoomActivity(db: DatabaseSync, roomId: string, nowMs: number = Date.now()): void {
@@ -104,7 +104,7 @@ function rowToRoom(row: unknown): Room {
     visibility: r.visibility,
     code: r.code,
     maxUsers: r.maxUsers,
-    autoCloseEnabled: r.autoCloseEnabled === 1,
+    autoCloseEnabled: true,
     createdAt: r.createdAt,
     lastMeaningfulActivityAt: r.lastMeaningfulActivityAt,
     closed: r.closed === 1,
@@ -201,7 +201,7 @@ export function createRoom(db: DatabaseSync, request: CreateRoomRequest): Room {
     visibility: request.visibility,
     code,
     maxUsers: MAX_ROOM_USERS,
-    autoCloseEnabled: request.autoCloseEnabled,
+    autoCloseEnabled: true,
     createdAt: now,
     lastMeaningfulActivityAt: now,
     closed: false,

@@ -65,7 +65,7 @@ describe("logging", () => {
           "PLAYBACK_CHANGE",
           "QUEUE_REMOVE",
           "QUEUE_REORDER",
-          "REACTION_CREATE",
+          "CHAT_SEND",
           "RECONNECT",
           "ROOM_AUTO_CLOSE",
         ].sort(),
@@ -115,13 +115,13 @@ describe("logging", () => {
       const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
       const nowMs = Date.parse("2026-01-02T03:04:05.000Z");
 
-      logAction(db, { action: "REACTION_CREATE", result: "ok", roomId: "room-1", accountId: "account-1" }, nowMs);
+      logAction(db, { action: "CHAT_SEND", result: "ok", roomId: "room-1", accountId: "account-1" }, nowMs);
 
       expect(consoleLogSpy).toHaveBeenCalledTimes(1);
       const printed = JSON.parse(consoleLogSpy.mock.calls[0][0] as string);
       expect(printed).toEqual({
         timestamp: "2026-01-02T03:04:05.000Z",
-        action: "REACTION_CREATE",
+        action: "CHAT_SEND",
         result: "ok",
         roomId: "room-1",
         accountId: "account-1",

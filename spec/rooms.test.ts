@@ -31,7 +31,7 @@ async function createRoom(
 }
 
 // Regression: these endpoints used to trust a bare accountId, which is public
-// (every room broadcasts it via presence, queue addedBy and reactions) — so
+// (every room broadcasts it via presence, queue addedBy and chat) — so
 // anyone could create rooms, join rooms or add tracks as someone else.
 describe("acting as an account over REST", () => {
   it("requires the clientId that registered the account", async () => {

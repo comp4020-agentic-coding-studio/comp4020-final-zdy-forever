@@ -28,7 +28,6 @@ import {
   SERVER_ALIVE_INTERVAL_MS,
 } from "./playback.ts";
 import { addTrack, InvalidTrackError, listQueue } from "./queue.ts";
-import { broadcastReactionHistory } from "./reactions.ts";
 import { attachRealtime } from "./realtime.ts";
 import {
   createRoom,
@@ -85,7 +84,7 @@ app.get("/api/health", (_req, res) => {
 // Every REST call that acts as an account proves it the way a socket does
 // (see realtime.ts's io.use): with the clientId that registered it, which
 // only that browser holds. An accountId alone is no proof — it's public,
-// broadcast to a whole room via presence, queue addedBy and reactions — and
+// broadcast to a whole room via presence, queue addedBy and chat — and
 // trusting one used to let anyone add tracks (becoming DJ) or join rooms as
 // someone else. Responds 401 and returns null when the pair doesn't match.
 function authenticate(req: express.Request, res: express.Response): string | null {
@@ -170,7 +169,6 @@ app.post("/api/rooms", (req, res) => {
   const body = req.body as Partial<CreateRoomRequest>;
   const name = typeof body.name === "string" ? body.name.trim() : "";
   const visibility = body.visibility;
-  const autoCloseEnabled = typeof body.autoCloseEnabled === "boolean" ? body.autoCloseEnabled : false;
 
   if (!name || (visibility !== "PUBLIC" && visibility !== "PRIVATE")) {
     res.status(400).json({ error: "name and visibility (PUBLIC or PRIVATE) are required" });
@@ -181,7 +179,7 @@ app.post("/api/rooms", (req, res) => {
     return;
   }
 
-  const room: Room = createRoom(db, { accountId, name, visibility, autoCloseEnabled });
+  const room: Room = createRoom(db, { accountId, name, visibility });
   res.status(201).json(room);
 });
 
@@ -304,7 +302,6 @@ app.post("/api/rooms/:roomId/queue", async (req, res) => {
     io.to(roomId).emit("queue:itemAdded", item);
     if (started) {
       io.to(roomId).emit("playback:update", started);
-      broadcastReactionHistory(io, db, roomId, started.videoId);
     }
     res.status(201).json(item);
   } catch (err) {
@@ -369,5 +366,5 @@ app.use((_req, res) => {
 
 const PORT = Number(process.env.PORT) || 8080;
 httpServer.listen(PORT, () => {
-  console.log(`Echo Room server listening on :${PORT}`);
+  console.log(`Watch YouTube Together server listening on :${PORT}`);
 });

@@ -53,6 +53,7 @@ export function openDatabase(dbPath: string): DatabaseSync {
   if (!existingRoomColumns.has("queueRevision")) {
     db.exec("ALTER TABLE rooms ADD COLUMN queueRevision INTEGER NOT NULL DEFAULT 1");
   }
+  db.exec("UPDATE rooms SET autoCloseEnabled = 1 WHERE autoCloseEnabled = 0");
 
   // A code is exclusive only while its room is active (closed = 0), so a
   // closed room's code is free for a new room to reuse.
@@ -120,10 +121,8 @@ export function openDatabase(dbPath: string): DatabaseSync {
   // advances on every anchor rebase (play/pause/seek, track transition, or a
   // server-restart recovery) — it never resets, including across a track
   // change. A future vote/skip proposal must reference both {playbackId,
-  // revision} to detect staleness (see isStaleReference). The DJ for the
-  // current track is never stored here: it's always looked up live as
-  // queue_items.addedBy for this row's queueItemId, so it belongs to the
-  // track (not permanently to the room) and can't drift out of sync.
+  // revision} to detect staleness (see isStaleReference). djAccountId is a
+  // nullable handoff override; NULL uses the current queue item's adder.
   db.exec(`
     CREATE TABLE IF NOT EXISTS room_playback (
       roomId             TEXT PRIMARY KEY REFERENCES rooms(roomId),
@@ -145,6 +144,9 @@ export function openDatabase(dbPath: string): DatabaseSync {
   const existingColumns = new Set(
     (db.prepare("PRAGMA table_info(room_playback)").all() as { name: string }[]).map((c) => c.name),
   );
+  if (!existingColumns.has("djAccountId")) {
+    db.exec("ALTER TABLE room_playback ADD COLUMN djAccountId TEXT REFERENCES accounts(accountId)");
+  }
   if (!existingColumns.has("status")) {
     db.exec("ALTER TABLE room_playback ADD COLUMN status TEXT NOT NULL DEFAULT 'PAUSED'");
     db.exec("ALTER TABLE room_playback ADD COLUMN anchorPositionMs INTEGER NOT NULL DEFAULT 0");
@@ -156,34 +158,34 @@ export function openDatabase(dbPath: string): DatabaseSync {
   // used to be rationed by tokens, which docs/adr/0005 removed. Nothing reads
   // or writes it any more.)
 
-  // One row per recorded reaction (CLAUDE.md's Reactions section). displayName
-  // is denormalized here (rather than looked up live from accounts, as the DJ
-  // is in room_playback) because a reaction is a historical record of what
-  // was shown at the time — it should read the same on replay even if the
-  // account later changes its display name. There is no "kind" (LIVE/ECHO)
-  // column: that distinction only ever exists at the wire level (see
-  // shared/src/types.ts's ReactionEvent) — a stored row is always just the
-  // fact of a live moment. Matching for historical replay is by (roomId,
-  // videoId) alone (see reactions_room_video below), deliberately never by
-  // playbackId, since a video restarting under a brand new playbackId is
-  // exactly the "same video plays again" case that must still surface prior
-  // reactions — playbackId is kept purely for reference/debugging.
+  // Reaction playback/echoes were replaced by room chat. Remove old storage
+  // when opening an existing database as well as on fresh installations.
+  db.exec("DROP TABLE IF EXISTS reactions");
   db.exec(`
-    CREATE TABLE IF NOT EXISTS reactions (
-      reactionId  TEXT PRIMARY KEY,
-      roomId      TEXT NOT NULL REFERENCES rooms(roomId),
-      videoId     TEXT NOT NULL,
-      playbackId  TEXT NOT NULL,
-      accountId   TEXT NOT NULL REFERENCES accounts(accountId),
+    CREATE TABLE IF NOT EXISTS chat_messages (
+      messageId TEXT PRIMARY KEY,
+      roomId TEXT NOT NULL REFERENCES rooms(roomId) ON DELETE CASCADE,
+      accountId TEXT NOT NULL REFERENCES accounts(accountId),
       displayName TEXT NOT NULL,
-      reaction    TEXT NOT NULL CHECK (reaction IN ('❤️', '🔥', '😭', '✨')),
-      positionMs  INTEGER NOT NULL,
-      createdAt   TEXT NOT NULL
-    )
-  `);
+      text TEXT NOT NULL,
+      createdAt TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS chat_messages_room ON chat_messages(roomId);
 
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS reactions_room_video ON reactions(roomId, videoId)
+    -- Closure and deletion of history must be one atomic operation, regardless
+    -- of whether the room is closed by the sweep or another server code path.
+    CREATE TRIGGER IF NOT EXISTS delete_chat_on_room_close
+    AFTER UPDATE OF closed ON rooms WHEN NEW.closed = 1
+    BEGIN
+      DELETE FROM chat_messages WHERE roomId = NEW.roomId;
+    END;
+    CREATE TRIGGER IF NOT EXISTS reject_chat_in_closed_room
+    BEFORE INSERT ON chat_messages
+    WHEN NOT EXISTS (SELECT 1 FROM rooms WHERE roomId = NEW.roomId AND closed = 0)
+    BEGIN
+      SELECT RAISE(ABORT, 'room is closed');
+    END;
+    DELETE FROM chat_messages WHERE roomId IN (SELECT roomId FROM rooms WHERE closed = 1);
   `);
 
   // The last moment this server process was known to be running, refreshed

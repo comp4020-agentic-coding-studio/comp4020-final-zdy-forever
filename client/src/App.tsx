@@ -1,20 +1,20 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
-  REACTION_EMOJIS,
   type Account,
-  type HealthResponse,
   type JoinRoomResult,
   type LobbyRoom,
   type QueueItem,
   type Room,
 } from "../../shared/src/types.ts";
 import { placementAllowed } from "../../shared/src/queueRules.ts";
+import { RoomChat } from "./RoomChat.tsx";
+import { RoomMembersPopover } from "./RoomMembersPopover.tsx";
+import { SeekControl } from "./SeekControl.tsx";
+import { DjHandoffDialog } from "./DjHandoffDialog.tsx";
 import { getClientId } from "./clientId.ts";
 import { loadRoomId, saveRoomId } from "./roomSession.ts";
 import { usePlaybackSync } from "./usePlaybackSync.ts";
 import { YoutubePlayer, type YoutubePlayerHandle } from "./YoutubePlayer.tsx";
-
-type HealthState = HealthResponse | "error" | null;
 
 type PostResult<T> = { ok: true; data: T } | { ok: false; error: string };
 
@@ -39,7 +39,6 @@ async function postJson<T>(url: string, body: unknown): Promise<PostResult<T>> {
 }
 
 function App() {
-  const [health, setHealth] = useState<HealthState>(null);
   const [displayName, setDisplayName] = useState("");
   const [account, setAccount] = useState<Account | "error" | null>(null);
 
@@ -55,11 +54,9 @@ function App() {
   const [lobby, setLobby] = useState<LobbyRoom[] | "error" | null>(null);
   const [newRoomName, setNewRoomName] = useState("");
   const [newRoomPrivate, setNewRoomPrivate] = useState(false);
-  const [newRoomAutoClose, setNewRoomAutoClose] = useState(true);
   const [codeInput, setCodeInput] = useState("");
   const [roomActionError, setRoomActionError] = useState<string | null>(null);
   const [liveRoomId, setLiveRoomId] = useState<string | null>(null);
-  const [seekSecondsInput, setSeekSecondsInput] = useState("");
   const playerRef = useRef<YoutubePlayerHandle | null>(null);
 
   // Local drag UI state only — never authoritative. The actual reorder is
@@ -93,9 +90,16 @@ function App() {
     if (!list) return;
     if (!current || !last || current === list.firstElementChild) {
       list.style.height = "";
+      list.style.paddingBottom = "";
       return;
     }
-    list.style.height = `${last.offsetTop + last.offsetHeight - current.offsetTop}px`;
+    const remainingHeight = last.offsetTop + last.offsetHeight - current.offsetTop;
+    // Keep the current track at the top even when only one song remains in
+    // the taller queue viewport; the spare space belongs below it, not above.
+    const fitted = window.matchMedia("(min-width: 1440px)").matches;
+    list.style.height = fitted ? "" : `${remainingHeight}px`;
+    const viewportHeight = fitted ? list.clientHeight : parseFloat(getComputedStyle(list).minHeight) || 0;
+    list.style.paddingBottom = `${Math.max(0, viewportHeight - remainingHeight)}px`;
   }, []);
   const scrollQueueToCurrent = (behavior: ScrollBehavior) => {
     const current = currentRow();
@@ -113,15 +117,10 @@ function App() {
   }, [queueKey, live.playback?.queueItemId, currentIndex, liveRoomId, sizeQueueList]);
   useEffect(() => {
     window.addEventListener("resize", sizeQueueList);
-    return () => window.removeEventListener("resize", sizeQueueList);
-  }, [sizeQueueList]);
-
-  useEffect(() => {
-    fetch("/api/health")
-      .then((res) => res.json() as Promise<HealthResponse>)
-      .then(setHealth)
-      .catch(() => setHealth("error"));
-  }, []);
+    const observer = new ResizeObserver(sizeQueueList);
+    if (queueListRef.current) observer.observe(queueListRef.current, { box: "border-box" });
+    return () => { window.removeEventListener("resize", sizeQueueList); observer.disconnect(); };
+  }, [sizeQueueList, liveRoomId]);
 
   const register = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -196,12 +195,12 @@ function App() {
   // closed, gone) or the room closed under us — means back to the lobby,
   // with the reason, rather than a room view that can't do anything.
   useEffect(() => {
-    if (liveRoomId && live.joinError) {
+    if (liveRoomId && (live.joinError || live.leftRoom)) {
       leaveRoom();
       setRoomActionError(live.joinError);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [liveRoomId, live.joinError]);
+  }, [liveRoomId, live.joinError, live.leftRoom]);
 
   const createRoom = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -210,7 +209,6 @@ function App() {
       ...credentials(),
       name: newRoomName,
       visibility: newRoomPrivate ? "PRIVATE" : "PUBLIC",
-      autoCloseEnabled: newRoomAutoClose,
     });
     if (!result.ok) {
       setRoomActionError(result.error);
@@ -277,13 +275,14 @@ function App() {
   // Shown whenever you're in a room, always at the top (CLAUDE.md: keep the
   // YouTube player visible). The lobby has nothing to play, so no player.
   const playerCard = (
-    <div className="card card--accent-pink">
+    <div className="card card--player card--accent-pink">
       <h2>🎬 Now playing</h2>
       <YoutubePlayer
         ref={playerRef}
         videoId={live.playback?.videoId ?? null}
         onStateChange={live.handlePlayerStateChange}
         onReady={live.handlePlayerReady}
+        onSettingsClosed={live.handlePlayerReady}
       />
       {live.playback && (
         <>
@@ -390,10 +389,6 @@ function App() {
               🔒 Private — join with a 6-digit code
             </label>
           </fieldset>
-          <label className="toggle">
-            <input type="checkbox" checked={newRoomAutoClose} onChange={(e) => setNewRoomAutoClose(e.target.checked)} />
-            ⏲ Close automatically after 2 hours with no activity
-          </label>
           <button type="submit" className="btn btn--green" disabled={!accountId}>
             ✨ Create room
           </button>
@@ -455,7 +450,7 @@ function App() {
   // room's queue (no vote needed).
   const inRoom = liveRoomId !== null;
   const songSection = (
-    <section className="section-stack">
+    <section className="section-stack add-link-section">
       <div className="card card--accent-blue">
         <h2>🔗 Add a YouTube link</h2>
         <form onSubmit={addLinkToQueue}>
@@ -465,28 +460,24 @@ function App() {
             placeholder="https://www.youtube.com/watch?v=…"
             aria-label="YouTube link"
           />
-          <button type="submit" className="btn btn--blue">
-            ➕ Add to queue
-          </button>
+          <div className="add-link-actions">
+            <button type="submit" className="btn btn--blue">
+              ➕ Add to queue
+            </button>
+            {addStatus && (
+              <span role={addStatus.ok ? "status" : "alert"}
+                className={`add-link-result add-link-result--${addStatus.ok ? "success" : "failed"}`}
+                title={addStatus.ok ? undefined : addStatus.text}>
+                {addStatus.ok ? "success" : "failed"}
+              </span>
+            )}
+          </div>
         </form>
-        {addStatus && (
-          <p role={addStatus.ok ? "status" : "alert"} className={addStatus.ok ? "notice" : undefined}>
-            {addStatus.text}
-          </p>
-        )}
       </div>
     </section>
   );
 
-  // The live room: vote > DJ+listeners > queue > reactions — see
-  // .room-grid in index.css for how this priority order is kept on both
-  // desktop (two columns) and mobile (single column) breakpoints. Every
-  // conditional below mirrors the original gating exactly (e.g. reactions
-  // and the vote/controls panel only render once live.playback exists;
-  // presence and the queue render regardless), just spread
-  // across separate cards instead of one big block.
-  const roomRegion = liveRoomId && (
-    <section className="section-stack">
+  const roomBar = (
       <div className="room-bar">
         <span className={`status-pill ${live.connected ? "status-pill--ok" : ""}`}>
           {live.connected ? "connected" : "connecting…"}
@@ -498,291 +489,245 @@ function App() {
           </span>
         )}
         {live.room && (
-          <span className="chip">
-            👥 {live.presence.length}/{live.room.maxUsers}
-          </span>
+          <RoomMembersPopover key={liveRoomId} members={live.presence}
+            capacity={live.room.maxUsers} dj={live.playback?.dj ?? null} />
         )}
-        <button type="button" className="btn btn--sm" onClick={leaveRoom}>
+        <button type="button" className="btn btn--sm" onClick={live.requestLeaveRoom}>
           🚪 Leave
         </button>
       </div>
+  );
 
-      <div className="room-grid">
-        <div className="card card--vote card--accent-blue">
-          <h2>🗳️ Vote &amp; controls</h2>
-          {live.activeProposal ? (
-            (() => {
-              const proposal = live.activeProposal!;
-              return (
-                <>
-                  <p className="sticker sticker--live">{proposal.type} · voting…</p>
-                  <div className="vote-progress">
-                    <span className="vote-progress--yes">
-                      ✅ YES {Object.values(proposal.votes).filter((v) => v === "YES").length}
-                    </span>
-                    <span className="vote-progress--no">
-                      ❌ NO {Object.values(proposal.votes).filter((v) => v === "NO").length}
-                    </span>
-                  </div>
-                  {accountId && !(accountId in proposal.votes) && (
-                    <div className="btn-row">
-                      <button
-                        type="button"
-                        className="btn btn--green"
-                        onClick={() => live.castProposalVote(proposal.proposalId, "YES")}
-                      >
-                        👍 Vote YES
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn--red"
-                        onClick={() => live.castProposalVote(proposal.proposalId, "NO")}
-                      >
-                        👎 Vote NO
-                      </button>
-                    </div>
-                  )}
-                </>
-              );
-            })()
-          ) : !live.playback ? (
-            <p>nothing is currently playing</p>
-          ) : (
-            <div className="btn-row">
-              <button
-                type="button"
-                className="btn btn--green"
-                onClick={() => live.requestPlaybackProposal("PLAY")}
-                disabled={live.playback.status === "PLAYING"}
-              >
-                ▶ Propose Play
-              </button>
-              <button
-                type="button"
-                className="btn btn--yellow"
-                onClick={() => live.requestPlaybackProposal("PAUSE")}
-                disabled={live.playback.status === "PAUSED"}
-              >
-                ⏸ Propose Pause
-              </button>
-              <button type="button" className="btn btn--blue" onClick={() => live.requestPlaybackProposal("SKIP")}>
-                ⏭ Propose Skip
-              </button>
-              {accountId === live.playback.dj.accountId && (
-                <form
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    const seconds = Number(seekSecondsInput);
-                    if (!Number.isFinite(seconds) || seconds < 0) return;
-                    live.requestSeekProposal(Math.round(seconds * 1000));
-                  }}
-                >
-                  <input
-                    type="number"
-                    min="0"
-                    value={seekSecondsInput}
-                    onChange={(e) => setSeekSecondsInput(e.target.value)}
-                    placeholder="seconds"
-                    aria-label="seek position in seconds"
-                  />
-                  <button type="submit" className="btn btn--purple">
-                    ⏩ Propose Seek
-                  </button>
-                </form>
-              )}
-            </div>
-          )}
-          {/* The room — not just this player — is paused (e.g. after a
-              server restart); and alone, there's nobody to vote with. */}
-          {live.playback?.status === "PAUSED" && (
-            <p className="footer-note">⏸ Paused for everyone in the room — propose Play to resume.</p>
-          )}
-          {live.playback && live.presence.length < 2 && (
-            <p className="footer-note">You're the only one here, so your proposals take effect straight away.</p>
-          )}
-          {!live.activeProposal && live.lastProposalResult && (
-            <p className="sticker">
-              last vote: {live.lastProposalResult.proposal.type} ·{" "}
-              {live.lastProposalResult.proposal.state === "FAILED"
-                ? "failed"
-                : live.lastProposalResult.applied
-                  ? "passed"
-                  : "passed, but the room had already moved on"}
-            </p>
-          )}
-          {live.proposalError && <p role="alert">{live.proposalError}</p>}
-        </div>
-
-        <div className="card card--dj card--accent-purple">
-          <h2>🎧 DJ &amp; listeners</h2>
-          {live.playback && <p className="sticker sticker--dj">DJ: {live.playback.dj.displayName}</p>}
-          <div className="chip-row">
-            {live.presence.length === 0 ? (
-              <span>nobody yet</span>
-            ) : (
-              live.presence.map((p) => (
-                <span key={p.accountId} className="chip">
-                  <span className="chip-avatar" aria-hidden="true">
-                    {p.displayName.slice(0, 1).toUpperCase()}
-                  </span>
-                  {p.displayName}
+  const voteCard = (
+    <div className="card card--vote card--accent-blue">
+      <h2>🗳️ Vote &amp; controls</h2>
+      {live.activeProposal ? (
+        (() => {
+          const proposal = live.activeProposal!;
+          return (
+            <>
+              <p className="sticker sticker--live">
+                {proposal.payload.type === "REPLAY_QUEUE_ITEM"
+                  ? `从「${live.queue.find((item) => proposal.payload.type === "REPLAY_QUEUE_ITEM" && item.queueItemId === proposal.payload.queueItemId)?.title ?? "视频"}」开始重播`
+                  : proposal.type} · voting…
+              </p>
+              <div className="vote-progress">
+                <span className="vote-progress--yes">
+                  ✅ YES {Object.values(proposal.votes).filter((v) => v === "YES").length}
                 </span>
-              ))
-            )}
-          </div>
+                <span className="vote-progress--no">
+                  ❌ NO {Object.values(proposal.votes).filter((v) => v === "NO").length}
+                </span>
+              </div>
+              {accountId && !(accountId in proposal.votes) && (
+                <div className="btn-row">
+                  <button
+                    type="button"
+                    className="btn btn--green"
+                    onClick={() => live.castProposalVote(proposal.proposalId, "YES")}
+                  >
+                    👍 Vote YES
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn--red"
+                    onClick={() => live.castProposalVote(proposal.proposalId, "NO")}
+                  >
+                    👎 Vote NO
+                  </button>
+                </div>
+              )}
+            </>
+          );
+        })()
+      ) : !live.playback ? (
+        <p>nothing is currently playing</p>
+      ) : (
+        <div className="btn-row">
+          <button
+            type="button"
+            className="btn btn--green"
+            onClick={() => live.requestPlaybackProposal("PLAY")}
+            disabled={live.playback.status === "PLAYING"}
+          >
+            ▶ Propose Play
+          </button>
+          <button
+            type="button"
+            className="btn btn--yellow"
+            onClick={() => live.requestPlaybackProposal("PAUSE")}
+            disabled={live.playback.status === "PAUSED"}
+          >
+            ⏸ Propose Pause
+          </button>
+          <button type="button" className="btn btn--blue" onClick={() => live.requestPlaybackProposal("SKIP")}>
+            ⏭ Propose Skip
+          </button>
+          {accountId === live.playback.dj.accountId && (
+            <SeekControl key={live.playback.playbackId} onPropose={live.requestSeekProposal} />
+          )}
         </div>
+      )}
+      {!live.activeProposal && live.lastProposalResult && (
+        <p className="sticker">
+          last vote: {live.lastProposalResult.proposal.type} ·{" "}
+          {live.lastProposalResult.proposal.state === "FAILED"
+            ? "failed"
+            : live.lastProposalResult.applied
+              ? "passed"
+              : "passed, but the room had already moved on"}
+        </p>
+      )}
+      {live.proposalError && <p role="alert">{live.proposalError}</p>}
+    </div>
+  );
 
-        <div className="card card--queue card--accent-green">
-          <div className="queue-heading">
-            <h2>📜 Queue ({live.queue.length})</h2>
-            {currentIndex >= 0 && (
+  const queueCard = (
+    <div className="card card--queue card--accent-green">
+      <div className="queue-heading">
+        <h2>📜 Queue ({live.queue.length})</h2>
+        {currentIndex >= 0 && (
+          <button
+            type="button"
+            className="btn btn--sm"
+            onClick={() => scrollQueueToCurrent("smooth")}
+            aria-label="scroll the queue back to the track playing now"
+          >
+            📍 Now playing
+          </button>
+        )}
+      </div>
+      <ul className="queue-list" ref={queueListRef}>
+        {live.queue.map((item, index) => {
+          // History (played, above the current track) can only move
+          // down — past the current track it plays again; what's still
+          // to come moves only among itself; the current track stays
+          // put. The same rule the server enforces (shared/src/queueRules.ts).
+          const state =
+            currentIndex === -1 || index > currentIndex ? "upcoming" : index === currentIndex ? "current" : "history";
+          const dragFrom = dragQueueItemId ? live.queue.findIndex((q) => q.queueItemId === dragQueueItemId) : -1;
+          const upTarget = index - 1;
+          const downTarget = Math.min(index + 2, live.queue.length);
+          return (
+          <li
+            key={item.queueItemId}
+            className={`queue-item queue-item--${state}${!live.playback ? " queue-item--static" : ""}`}
+            draggable={!!live.playback && state !== "current"}
+            onDragStart={() => setDragQueueItemId(item.queueItemId)}
+            onDragEnd={() => setDragQueueItemId(null)}
+            onDragOver={(e) => {
+              if (live.playback && dragFrom !== -1 && canMove(dragFrom, index)) e.preventDefault();
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              if (live.playback && dragQueueItemId && dragFrom !== -1 && canMove(dragFrom, index)) {
+                live.requestReorderQueueProposal(dragQueueItemId, item.queueItemId);
+              }
+              setDragQueueItemId(null);
+            }}
+          >
+            <span className="queue-item-title">
+              {state === "current" && "▶ "}
+              {item.title} — {item.channelTitle}
+            </span>
+            {!live.playback ? (
               <button
                 type="button"
                 className="btn btn--sm"
-                onClick={() => scrollQueueToCurrent("smooth")}
-                aria-label="scroll the queue back to the track playing now"
+                disabled={!live.connected || !!live.activeProposal}
+                aria-label={`restart here: ${item.title}`}
+                onClick={() => live.requestReplayQueueProposal(item.queueItemId)}
               >
-                📍 Now playing
+                restart here
+              </button>
+            ) : (
+            <>
+            {/* Mobile-accessible fallback for drag-and-drop: swaps this
+                item with its immediate neighbor. Both request the exact
+                same REORDER_QUEUE proposal a drag would — no separate
+                code path on the server. */}
+            <button
+              type="button"
+              className="btn btn--sm"
+              disabled={upTarget < 0 || !canMove(index, upTarget)}
+              aria-label={`move "${item.title}" up in the queue`}
+              onClick={() =>
+                live.requestReorderQueueProposal(item.queueItemId, live.queue[index - 1].queueItemId)
+              }
+            >
+              ⬆
+            </button>
+            <button
+              type="button"
+              className="btn btn--sm"
+              disabled={!canMove(index, downTarget)}
+              aria-label={`move "${item.title}" down in the queue`}
+              onClick={() =>
+                live.requestReorderQueueProposal(
+                  item.queueItemId,
+                  index + 2 < live.queue.length ? live.queue[index + 2].queueItemId : null,
+                )
+              }
+            >
+              ⬇
+            </button>
+            {/* The currently-playing item can never be removed via a vote
+                here — see ProposalManager.requestRemoveQueueItem in
+                server/src/proposals.ts; skip is the only way off it. */}
+            {item.queueItemId !== live.playback?.queueItemId && (
+              <button
+                type="button"
+                className="btn btn--sm btn--red"
+                aria-label={`propose removing "${item.title}" from the queue`}
+                onClick={() => live.requestRemoveQueueItemProposal(item.queueItemId)}
+              >
+                🗑
               </button>
             )}
-          </div>
-          <ul className="queue-list" ref={queueListRef}>
-            {live.queue.map((item, index) => {
-              // History (played, above the current track) can only move
-              // down — past the current track it plays again; what's still
-              // to come moves only among itself; the current track stays
-              // put. The same rule the server enforces (shared/src/queueRules.ts).
-              const state =
-                currentIndex === -1 || index > currentIndex ? "upcoming" : index === currentIndex ? "current" : "history";
-              const dragFrom = dragQueueItemId ? live.queue.findIndex((q) => q.queueItemId === dragQueueItemId) : -1;
-              const upTarget = index - 1;
-              const downTarget = Math.min(index + 2, live.queue.length);
-              return (
-              <li
-                key={item.queueItemId}
-                className={`queue-item queue-item--${state}`}
-                draggable={state !== "current"}
-                onDragStart={() => setDragQueueItemId(item.queueItemId)}
-                onDragEnd={() => setDragQueueItemId(null)}
-                onDragOver={(e) => {
-                  if (dragFrom !== -1 && canMove(dragFrom, index)) e.preventDefault();
-                }}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  if (dragQueueItemId && dragFrom !== -1 && canMove(dragFrom, index)) {
-                    live.requestReorderQueueProposal(dragQueueItemId, item.queueItemId);
-                  }
-                  setDragQueueItemId(null);
-                }}
-              >
-                <span className="queue-item-title">
-                  {state === "current" && "▶ "}
-                  {item.title} — {item.channelTitle}
-                </span>
-                {/* Mobile-accessible fallback for drag-and-drop: swaps this
-                    item with its immediate neighbor. Both request the exact
-                    same REORDER_QUEUE proposal a drag would — no separate
-                    code path on the server. */}
-                <button
-                  type="button"
-                  className="btn btn--sm"
-                  disabled={upTarget < 0 || !canMove(index, upTarget)}
-                  aria-label={`move "${item.title}" up in the queue`}
-                  onClick={() =>
-                    live.requestReorderQueueProposal(item.queueItemId, live.queue[index - 1].queueItemId)
-                  }
-                >
-                  ⬆
-                </button>
-                <button
-                  type="button"
-                  className="btn btn--sm"
-                  disabled={!canMove(index, downTarget)}
-                  aria-label={`move "${item.title}" down in the queue`}
-                  onClick={() =>
-                    live.requestReorderQueueProposal(
-                      item.queueItemId,
-                      index + 2 < live.queue.length ? live.queue[index + 2].queueItemId : null,
-                    )
-                  }
-                >
-                  ⬇
-                </button>
-                {/* The currently-playing item can never be removed via a vote
-                    here — see ProposalManager.requestRemoveQueueItem in
-                    server/src/proposals.ts; skip is the only way off it. */}
-                {item.queueItemId !== live.playback?.queueItemId && (
-                  <button
-                    type="button"
-                    className="btn btn--sm btn--red"
-                    aria-label={`propose removing "${item.title}" from the queue`}
-                    onClick={() => live.requestRemoveQueueItemProposal(item.queueItemId)}
-                  >
-                    🗑
-                  </button>
-                )}
-              </li>
-              );
-            })}
-          </ul>
-        </div>
-
-        <div className="card card--reactions card--accent-orange">
-          <h2>✨ Reactions</h2>
-          {live.playback && (
-            <>
-              <div className="reactions-bar">
-                {REACTION_EMOJIS.map((emoji) => (
-                  <button
-                    key={emoji}
-                    type="button"
-                    className="reaction-button"
-                    aria-label={`send ${emoji} reaction`}
-                    onClick={() => live.sendReaction(emoji)}
-                  >
-                    {emoji}
-                  </button>
-                ))}
-              </div>
-              {live.reactionError && <p role="alert">{live.reactionError}</p>}
-              <div className="reactions-feed" aria-live="polite">
-                {live.liveReactions.map((r) => (
-                  <span key={r.key} className={`reaction-bubble reaction-bubble--${r.kind.toLowerCase()}`}>
-                    {r.reaction.reaction} {r.reaction.displayName}
-                    {r.kind === "ECHO" && <> · {new Date(r.reaction.createdAt).toLocaleDateString()}</>}
-                  </span>
-                ))}
-              </div>
             </>
-          )}
-        </div>
-      </div>
-    </section>
+            )}
+          </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+
+  const chatCard = (
+    <RoomChat
+      key={liveRoomId}
+      messages={live.chatMessages}
+      accountId={accountId}
+      connected={live.connected}
+      error={live.chatError}
+      onSend={live.sendChatMessage}
+    />
   );
 
   return (
-    <main className="app-shell">
-      <header className="app-header">
-        <div className="brand">
-          <span className="brand-badge" aria-hidden="true">
-            🎧
-          </span>
-          <h1>Echo Room</h1>
-        </div>
-        <span
-          className={`status-pill ${health !== null && health !== "error" ? "status-pill--ok" : health === "error" ? "status-pill--error" : ""}`}
-        >
-          {health === null && "checking server…"}
-          {health === "error" && "server unreachable"}
-          {health !== null && health !== "error" && `server up ${Math.round(health.uptime)}s`}
-        </span>
-      </header>
-
+    <main className={`app-shell${inRoom ? " app-shell--room" : ""}`}>
+      {live.djHandoff && (
+        <DjHandoffDialog key={live.djHandoff.requestId} handoff={live.djHandoff}
+          members={live.presence.filter((person) => person.accountId !== accountId)}
+          error={live.leaveError} onChoose={live.chooseNextDj} />
+      )}
+      {live.leaveError && !live.djHandoff && <p role="alert">{live.leaveError}</p>}
       {inRoom ? (
         <>
-          {playerCard}
-          {roomRegion}
-          {songSection}
+          {roomBar}
+          <div className="room-layout">
+            <section className="room-main-column section-stack" aria-label="Video">
+              {playerCard}
+            </section>
+            <aside className="room-social-column section-stack" aria-label="Room controls and chat">
+              {voteCard}
+              {chatCard}
+            </aside>
+            <aside className="room-queue-column section-stack" aria-label="Add videos and queue">
+              {songSection}
+              {queueCard}
+            </aside>
+          </div>
         </>
       ) : (
         lobbyRegion

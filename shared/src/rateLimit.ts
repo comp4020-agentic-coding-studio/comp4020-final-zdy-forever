@@ -3,10 +3,8 @@
 // against a caller-supplied `nowMs` and never reads the clock itself, so the
 // whole thing is trivially testable without fake timers or real waiting.
 //
-// Used to bound reaction spam (CLAUDE.md's Reactions section: reactions
-// never require voting, so nothing else stops a client from sending them as
-// fast as it likes) — see server/src/reactionRateLimiter.ts for the
-// ephemeral, in-memory store built on top of this.
+// Used by the room chat to bound message spam without requiring votes.
+// The per-room, per-account store lives in server/src/chat.ts.
 
 export interface RateLimitConfig {
   limit: number;

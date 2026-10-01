@@ -458,17 +458,10 @@ describe("realtime PLAY/PAUSE voting", () => {
 
     const proposalId = opened.proposal.proposalId;
 
-    // Casting the ballot immediately re-broadcasts the still-OPEN proposal
-    // (see ProposalManager.castVote) — that ack must be consumed before
-    // waiting for the separate, later broadcast that the 15-second (here,
-    // 60ms) timer produces once it actually resolves the vote.
-    const bobSeesVoteAck = waitFor<{ proposal: { state: string } }>(bobSocket, "proposal:update");
-    bobSocket.emit("proposal:vote", { proposalId, choice: "YES" });
-    const voteAck = await bobSeesVoteAck;
-    expect(voteAck.proposal.state).toBe("OPEN");
-
+    // Every present member has voted after Bob's ballot: resolve immediately.
     const bobSeesFinal = waitFor<{ proposal: { state: string }; applied: boolean }>(bobSocket, "proposal:update");
     const alicePlaybackUpdate = waitFor(aliceSocket, "playback:update");
+    bobSocket.emit("proposal:vote", { proposalId, choice: "YES" });
 
     const resolved = await bobSeesFinal;
     expect(resolved.proposal.state).toBe("PASSED");
@@ -512,7 +505,7 @@ describe("realtime PLAY/PAUSE voting", () => {
     expect((await requestError).error).toMatch(/already in progress/);
   });
 
-  it("rejects a duplicate vote-choice replacement being silently accepted twice: the ballot still counts once per account", async () => {
+  it("rejects ballot changes after all members voted and the tie has already failed", async () => {
     const aliceSocket = await connect(alice, "client-alice");
     aliceSocket.emit("room:join", { roomId });
     await waitFor(aliceSocket, "room:snapshot");
@@ -526,17 +519,15 @@ describe("realtime PLAY/PAUSE voting", () => {
     const opened = await waitFor<{ proposal: { proposalId: string } }>(bobSocket, "proposal:update");
     const proposalId = opened.proposal.proposalId;
 
+    const finalSeen = waitFor<{ proposal: { votes: Record<string, string>; state: string } }>(aliceSocket, "proposal:update");
     bobSocket.emit("proposal:vote", { proposalId, choice: "NO" });
-    await waitFor(aliceSocket, "proposal:update");
-    const finalSeen = waitFor<{ proposal: { votes: Record<string, string>; state: string } }>(
-      aliceSocket,
-      "proposal:update",
-    );
-    bobSocket.emit("proposal:vote", { proposalId, choice: "YES" });
-
     const final = await finalSeen;
-    expect(final.proposal.votes[bob.accountId]).toBe("YES");
+    expect(final.proposal.state).toBe("FAILED");
+    expect(final.proposal.votes[bob.accountId]).toBe("NO");
     expect(Object.keys(final.proposal.votes)).toHaveLength(2);
+    const rejected = waitFor<{ error: string }>(bobSocket, "proposal:voteError");
+    bobSocket.emit("proposal:vote", { proposalId, choice: "YES" });
+    expect((await rejected).error).toMatch(/no matching active proposal/);
   });
 
   // Regression: with one person in the room no vote could ever pass (it
@@ -690,12 +681,10 @@ describe("realtime SKIP voting and natural track end", () => {
     const opened = await bobSeesOpen;
     expect(opened.proposal.type).toBe("SKIP");
 
-    const bobSeesVoteAck = waitFor<{ proposal: { state: string } }>(bobSocket, "proposal:update");
-    bobSocket.emit("proposal:vote", { proposalId: opened.proposal.proposalId, choice: "YES" });
-    await bobSeesVoteAck;
-
+    const finalSeen = waitFor<{ proposal: { state: string }; applied: boolean }>(bobSocket, "proposal:update");
     const alicePlaybackUpdate = waitFor(aliceSocket, "playback:update");
-    const resolved = await waitFor<{ proposal: { state: string }; applied: boolean }>(bobSocket, "proposal:update");
+    bobSocket.emit("proposal:vote", { proposalId: opened.proposal.proposalId, choice: "YES" });
+    const resolved = await finalSeen;
     expect(resolved.proposal.state).toBe("PASSED");
     expect(resolved.applied).toBe(true);
 
@@ -918,12 +907,10 @@ describe("realtime SEEK voting", () => {
     expect(opened.proposal.type).toBe("SEEK");
     expect(opened.proposal.payload).toEqual({ type: "SEEK", positionMs: 42_000 });
 
-    const bobSeesVoteAck = waitFor<{ proposal: { state: string } }>(bobSocket, "proposal:update");
-    bobSocket.emit("proposal:vote", { proposalId: opened.proposal.proposalId, choice: "YES" });
-    await bobSeesVoteAck;
-
+    const finalSeen = waitFor<{ proposal: { state: string }; applied: boolean }>(bobSocket, "proposal:update");
     const alicePlaybackUpdate = waitFor(aliceSocket, "playback:update");
-    const resolved = await waitFor<{ proposal: { state: string }; applied: boolean }>(bobSocket, "proposal:update");
+    bobSocket.emit("proposal:vote", { proposalId: opened.proposal.proposalId, choice: "YES" });
+    const resolved = await finalSeen;
     expect(resolved.proposal.state).toBe("PASSED");
     expect(resolved.applied).toBe(true);
 
@@ -979,14 +966,11 @@ describe("realtime SEEK voting", () => {
     aliceSocket.emit("proposal:request", { type: "SEEK", positionMs: 30_000 });
     const opened = await bobSeesOpen;
 
-    const bobSeesVoteAck = waitFor(bobSocket, "proposal:update");
-    bobSocket.emit("proposal:vote", { proposalId: opened.proposal.proposalId, choice: "YES" });
-    await bobSeesVoteAck;
-
-    // Something else rebases the anchor out of band before the vote closes.
+    // Rebase before the last ballot; a fully cast stale vote must not apply.
     const rebased = setPlaybackStatus(db, roomId, "PAUSED")!;
-
-    const final = await waitFor<{ proposal: { state: string }; applied: boolean }>(bobSocket, "proposal:update");
+    const finalSeen = waitFor<{ proposal: { state: string }; applied: boolean }>(bobSocket, "proposal:update");
+    bobSocket.emit("proposal:vote", { proposalId: opened.proposal.proposalId, choice: "YES" });
+    const final = await finalSeen;
     expect(final.proposal.state).toBe("PASSED");
     expect(final.applied).toBe(false);
     expect(getCurrentPlayback(db, roomId)?.anchorPositionMs).toBe(rebased.anchorPositionMs);
@@ -1102,12 +1086,10 @@ describe("realtime REMOVE_QUEUE_ITEM voting", () => {
     expect(opened.proposal.type).toBe("REMOVE_QUEUE_ITEM");
     expect(opened.proposal.payload).toEqual({ type: "REMOVE_QUEUE_ITEM", queueItemId: b.queueItemId });
 
-    const bobSeesVoteAck = waitFor<{ proposal: { state: string } }>(bobSocket, "proposal:update");
-    bobSocket.emit("proposal:vote", { proposalId: opened.proposal.proposalId, choice: "YES" });
-    await bobSeesVoteAck;
-
+    const finalSeen = waitFor<{ proposal: { state: string }; applied: boolean }>(bobSocket, "proposal:update");
     const aliceSeesItemRemoved = waitFor<{ queueItemId: string }>(aliceSocket, "queue:itemRemoved");
-    const resolved = await waitFor<{ proposal: { state: string }; applied: boolean }>(bobSocket, "proposal:update");
+    bobSocket.emit("proposal:vote", { proposalId: opened.proposal.proposalId, choice: "YES" });
+    const resolved = await finalSeen;
     expect(resolved.proposal.state).toBe("PASSED");
     expect(resolved.applied).toBe(true);
 
@@ -1220,21 +1202,21 @@ describe("realtime error isolation", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("a DB write failure while sending a reaction fails only that event, and the server keeps serving", async () => {
+  it("a DB write failure while sending a chat message fails only that event, and the server keeps serving", async () => {
     const aliceSocket = await connect(alice, "client-alice");
     aliceSocket.emit("room:join", { roomId });
     await waitFor(aliceSocket, "room:snapshot");
 
-    const restore = failWrites("INSERT INTO reactions");
-    const sendError = waitFor<{ error: string }>(aliceSocket, "reaction:sendError");
-    aliceSocket.emit("reaction:send", { reaction: "🔥" });
+    const restore = failWrites("INSERT INTO chat_messages");
+    const sendError = waitFor<{ error: string }>(aliceSocket, "chat:sendError");
+    aliceSocket.emit("chat:send", { text: "Hello" });
     expect((await sendError).error).toBe("internal server error");
     restore();
 
     // Same socket, next event: still served normally.
-    const live = waitFor<{ kind: string }>(aliceSocket, "reaction:new");
-    aliceSocket.emit("reaction:send", { reaction: "🔥" });
-    expect((await live).kind).toBe("LIVE");
+    const live = waitFor<{ text: string }>(aliceSocket, "chat:new");
+    aliceSocket.emit("chat:send", { text: "Hello" });
+    expect((await live).text).toBe("Hello");
   });
 
   it("a DB write failure while joining reports a join error without leaving the socket half-present", async () => {
@@ -1527,14 +1509,14 @@ describe("realtime room closure", () => {
     goQuiet();
     const aliceClosed = waitFor<{ roomId: string }>(aliceSocket, "room:closed");
     const bobClosed = waitFor<{ roomId: string }>(bobSocket, "room:closed");
-    const refused = waitFor<{ error: string }>(aliceSocket, "reaction:sendError");
-    aliceSocket.emit("reaction:send", { reaction: "🔥" });
+    const refused = waitFor<{ error: string }>(aliceSocket, "chat:sendError");
+    aliceSocket.emit("chat:send", { text: "Hello" });
 
     expect((await refused).error).toBe("that room has closed");
     expect((await aliceClosed).roomId).toBe(roomId);
     expect((await bobClosed).roomId).toBe(roomId);
     expect(handles.presence.count(roomId)).toBe(0);
-    expect(db.prepare("SELECT COUNT(*) AS n FROM reactions").get()).toEqual({ n: 0 });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM chat_messages").get()).toEqual({ n: 0 });
 
     // Bob is out too: his next action is treated as coming from nowhere.
     const bobRefused = waitFor<{ error: string }>(bobSocket, "proposal:requestError");

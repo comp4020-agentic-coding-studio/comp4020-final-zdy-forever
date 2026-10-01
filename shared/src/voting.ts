@@ -14,7 +14,7 @@
 
 import { isStaleReference } from "./playbackSync.ts";
 
-export type ProposalType = "PLAY" | "PAUSE" | "SKIP" | "SEEK" | "REMOVE_QUEUE_ITEM" | "REORDER_QUEUE";
+export type ProposalType = "PLAY" | "PAUSE" | "SKIP" | "SEEK" | "REMOVE_QUEUE_ITEM" | "REORDER_QUEUE" | "REPLAY_QUEUE_ITEM";
 
 export type ProposalState = "OPEN" | "PASSED" | "FAILED";
 
@@ -28,6 +28,7 @@ export type ProposalPayload =
   | { type: "PAUSE" }
   | { type: "SKIP" }
   | { type: "SEEK"; positionMs: number }
+  | { type: "REPLAY_QUEUE_ITEM"; queueItemId: string }
   | { type: "REMOVE_QUEUE_ITEM"; queueItemId: string }
   | { type: "REORDER_QUEUE"; queueItemId: string; beforeQueueItemId: string | null };
 
@@ -45,6 +46,7 @@ const REFERENCE_KIND_BY_TYPE: Record<ProposalType, ProposalReference["kind"]> = 
   SEEK: "playback",
   REMOVE_QUEUE_ITEM: "queue",
   REORDER_QUEUE: "queue",
+  REPLAY_QUEUE_ITEM: "queue",
 };
 
 export interface Proposal {
@@ -161,7 +163,8 @@ export function tallyVotes(votes: Record<string, VoteChoice>): VoteTally {
 
 // Closes voting once the window has elapsed, deciding PASSED/FAILED from the
 // votes cast so far. A no-op (returns the same proposal unchanged) both
-// before expiresAt (too early — the full 15 seconds must run) and once
+// before expiresAt (the deadline path; the server may settle earlier once
+// every present account has voted) and once
 // already resolved (idempotent — safe to call repeatedly, e.g. from a
 // periodic sweep, without double-deciding a proposal).
 export function resolveProposal(proposal: Proposal, nowMs: number): Proposal {

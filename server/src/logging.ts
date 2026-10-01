@@ -16,7 +16,7 @@ export const LOG_ACTIONS = [
   "PLAYBACK_CHANGE",
   "QUEUE_REMOVE",
   "QUEUE_REORDER",
-  "REACTION_CREATE",
+  "CHAT_SEND",
   "RECONNECT",
   "ROOM_AUTO_CLOSE",
 ] as const;

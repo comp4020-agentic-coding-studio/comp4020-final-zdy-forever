@@ -48,7 +48,8 @@ export interface CreateRoomRequest {
   accountId: string;
   name: string;
   visibility: RoomVisibility;
-  autoCloseEnabled: boolean;
+  // Accepted for older clients only; rooms always auto-close after inactivity.
+  autoCloseEnabled?: boolean;
 }
 
 // The public lobby only ever lists PUBLIC, open rooms — never a PRIVATE
@@ -128,12 +129,7 @@ export interface RoomSnapshot {
   presence: PresenceEntry[];
   activeProposal: Proposal | null;
   playback: PlaybackState | null;
-  // Every reaction ever recorded against the currently-playing video in this
-  // room (empty array if nothing is playing) — seeded here so a late joiner
-  // or reconnecting client can immediately start matching historical echoes
-  // against local playback position, same as reactions:history on a later
-  // track transition (see CLAUDE.md's Reactions section).
-  reactionHistory: Reaction[];
+  chatMessages: ChatMessage[];
 }
 
 // Client -> server socket payload for joining/rejoining a room. accountId
@@ -159,10 +155,7 @@ export type PlaybackStatus = "PLAYING" | "PAUSED";
 // moment it's opened; if either has changed by the time it would execute,
 // the proposal is stale and must be rejected, never partially applied.
 //
-// dj is always the account that originally added this queue item — looked
-// up live, never cached — so the DJ role belongs to the track, not
-// permanently to the room, and is unaffected by that account's connection
-// state.
+// DJ starts as the track's adder, with a persisted override when they leave.
 export interface PlaybackState {
   playbackId: string;
   queueItemId: string;
@@ -188,40 +181,21 @@ export interface RoomPlaybackSnapshot {
   next: QueueItem | null;
 }
 
-// The small fixed reaction set (CLAUDE.md's Reactions section) — deliberately
-// closed, never free-text (that would be text chat, which CLAUDE.md
-// explicitly forbids).
-export const REACTION_EMOJIS = ["❤️", "🔥", "😭", "✨"] as const;
-export type ReactionEmoji = (typeof REACTION_EMOJIS)[number];
+// Plain-text, room-scoped messages. History exists only while the room is open.
+export const CHAT_MAX_LENGTH = 500;
 
-// A single stored reaction: the fact that `accountId` reacted with `reaction`
-// at `positionMs` into `videoId`, in `roomId`, at `createdAt`. Reactions never
-// require voting (CLAUDE.md's Voting section). positionMs is always the
-// server-computed expected position at the moment it was sent (see
-// shared/src/playbackSync.ts's computeExpectedPositionMs) — a client never
-// gets to claim its own position. playbackId is carried along for
-// reference/debugging only: matching for historical replay is deliberately
-// by (roomId, videoId) alone, never playbackId, since a video restarting
-// under a brand new playbackId is exactly the "same video plays again" case a
-// historical echo must still cover.
-export interface Reaction {
-  reactionId: string;
+export interface ChatMessage {
+  messageId: string;
   roomId: string;
-  videoId: string;
-  playbackId: string;
   accountId: string;
   displayName: string;
-  reaction: ReactionEmoji;
-  positionMs: number;
+  text: string;
   createdAt: string;
 }
 
-// Distinguishes a reaction's live broadcast from a later historical replay at
-// the wire level — this distinction is deliberately never stored in the
-// database row itself (see server/src/db.ts's reactions table): a stored
-// Reaction is always just "the fact of a live moment," and ECHO is purely a
-// redelivery/replay interpretation of that same fact when the same video
-// plays again, never a second persisted entity.
-export type ReactionEvent =
-  | { kind: "LIVE"; reaction: Reaction }
-  | { kind: "ECHO"; reaction: Reaction };
+export type ChatSendResult = { ok: true } | { ok: false; error: string };
+
+export interface DjHandoff {
+  requestId: string;
+  expiresAt: number;
+}

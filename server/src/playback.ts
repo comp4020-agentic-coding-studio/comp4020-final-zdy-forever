@@ -12,13 +12,14 @@ interface PlaybackRow {
   anchorPositionMs: number;
   anchorServerTimeMs: number;
   revision: number;
+  djAccountId: string | null;
 }
 
 const QUEUE_ITEM_COLUMNS =
   "queueItemId, roomId, videoId, title, channelTitle, thumbnailUrl, durationMs, addedBy, addedAt";
 
 const PLAYBACK_ROW_COLUMNS =
-  "roomId, playbackId, queueItemId, startedAt, status, anchorPositionMs, anchorServerTimeMs, revision";
+  "roomId, playbackId, queueItemId, startedAt, status, anchorPositionMs, anchorServerTimeMs, revision, djAccountId";
 
 function getQueueItemById(db: DatabaseSync, queueItemId: string): QueueItem | undefined {
   return db.prepare(`SELECT ${QUEUE_ITEM_COLUMNS} FROM queue_items WHERE queueItemId = ?`).get(queueItemId) as
@@ -37,7 +38,8 @@ function toPlaybackState(db: DatabaseSync, row: PlaybackRow): PlaybackState {
   // queue_items, and the current item can never be removed (see
   // queue.ts's removeQueueItem).
   const item = getQueueItemById(db, row.queueItemId) as QueueItem;
-  const djAccount = getAccountById(db, item.addedBy);
+  const djAccountId = row.djAccountId ?? item.addedBy;
+  const djAccount = getAccountById(db, djAccountId);
 
   return {
     playbackId: row.playbackId,
@@ -52,12 +54,7 @@ function toPlaybackState(db: DatabaseSync, row: PlaybackRow): PlaybackState {
     anchorPositionMs: row.anchorPositionMs,
     anchorServerTimeMs: row.anchorServerTimeMs,
     revision: row.revision,
-    // Looked up live from queue_items.addedBy rather than stored redundantly
-    // here: the DJ belongs to the track, not the room, and this way it can
-    // never drift out of sync with who actually added the track. Whether
-    // that account is currently connected is irrelevant — a disconnected DJ
-    // does not change or invalidate this.
-    dj: { accountId: item.addedBy, displayName: djAccount?.displayName ?? "Unknown" },
+    dj: { accountId: djAccountId, displayName: djAccount?.displayName ?? "Unknown" },
   };
 }
 
@@ -172,7 +169,8 @@ export function advanceToNextTrack(db: DatabaseSync, roomId: string): PlaybackSt
        status = excluded.status,
        anchorPositionMs = excluded.anchorPositionMs,
        anchorServerTimeMs = excluded.anchorServerTimeMs,
-       revision = excluded.revision`,
+       revision = excluded.revision,
+       djAccountId = NULL`,
   ).run(roomId, randomUUID(), next.queueItemId, new Date(nowMs).toISOString(), nowMs, previousRevision + 1);
 
   return getCurrentPlayback(db, roomId);

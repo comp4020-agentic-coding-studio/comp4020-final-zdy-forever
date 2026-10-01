@@ -76,6 +76,10 @@ export class PresenceStore {
     return sockets ? [...sockets.values()].some((s) => s.accountId === accountId) : false;
   }
 
+  connectionCount(roomId: string, accountId: string): number {
+    return [...(this.rooms.get(roomId)?.values() ?? [])].filter((record) => record.accountId === accountId).length;
+  }
+
   // Whether `accountId` may take a place in the room: always, if it's already
   // present (another tab of someone already counted), otherwise only while
   // fewer than `capacity` accounts are. The caller must join() in the same

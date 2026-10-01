@@ -112,14 +112,15 @@ describe("queue", () => {
   // with auto-close enabled must not close while tracks keep getting added.
   it("bumps the room's lastMeaningfulActivityAt on a successful add", async () => {
     const before = getRoomById(db, roomId)!.lastMeaningfulActivityAt;
-    db.prepare("UPDATE rooms SET lastMeaningfulActivityAt = '2000-01-01T00:00:00.000Z' WHERE roomId = ?").run(roomId);
+    const earlier = new Date(Date.now() - 60_000).toISOString();
+    db.prepare("UPDATE rooms SET lastMeaningfulActivityAt = ? WHERE roomId = ?").run(earlier, roomId);
     expect(getRoomById(db, roomId)!.lastMeaningfulActivityAt).not.toBe(before);
 
     const resolveMetadata = fakeMetadataFor({ [SONG_A.videoId]: SONG_A });
     await addTrack(db, roomId, accountId, SONG_A.videoId, { resolveMetadata });
 
     const after = getRoomById(db, roomId)!.lastMeaningfulActivityAt;
-    expect(Date.parse(after)).toBeGreaterThan(Date.parse("2000-01-01T00:00:00.000Z"));
+    expect(Date.parse(after)).toBeGreaterThan(Date.parse(earlier));
   });
 
   it("resolves a pasted URL to its canonical videoId rather than trusting client input", async () => {

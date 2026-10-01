@@ -7,16 +7,18 @@ import {
   createProposal,
   isProposalReferenceStale,
   resolveProposal,
+  tallyVotes,
   VOTING_WINDOW_MS,
   type Proposal,
   type ProposalBroadcast,
   type ProposalPayload,
   type ProposalReference,
+  type ProposalType,
   type VoteChoice,
 } from "../../shared/src/voting.ts";
 import { isPlausibleTrackEnd } from "../../shared/src/playbackSync.ts";
 import { logAction } from "./logging.ts";
-import { advanceToNextTrack, getCurrentPlayback, seekPlayback, setPlaybackStatus } from "./playback.ts";
+import { advanceToNextTrack, ensureCurrentTrack, getCurrentPlayback, seekPlayback, setPlaybackStatus } from "./playback.ts";
 import {
   getQueueItemById,
   getQueueRevision,
@@ -24,7 +26,6 @@ import {
   removeQueueItem,
   reorderQueueItem,
 } from "./queue.ts";
-import { broadcastReactionHistory } from "./reactions.ts";
 import { touchRoomActivity } from "./rooms.ts";
 
 // Wires the pure voting engine (shared/src/voting.ts) to real playback/queue
@@ -75,6 +76,8 @@ interface RequestOptions {
 // outright rather than queued, keeping the model simple and avoiding two
 // in-flight proposals ever disagreeing about the same anchor.
 export class ProposalManager {
+  constructor(private presentAccounts?: (roomId: string) => readonly string[]) {}
+
   private active = new Map<string, Proposal>();
   private timers = new Map<string, NodeJS.Timeout>();
   // Which accounts have reported the current track of a room ended, for a
@@ -92,7 +95,7 @@ export class ProposalManager {
     db: DatabaseSync,
     roomId: string,
     proposerAccountId: string,
-    type: "PLAY" | "PAUSE" | "SKIP" | "SEEK" | "REMOVE_QUEUE_ITEM" | "REORDER_QUEUE",
+    type: ProposalType,
     options: RequestOptions = {},
   ): ProposalOutcome {
     if (this.active.has(roomId)) {
@@ -108,6 +111,17 @@ export class ProposalManager {
     }
     if (type === "REORDER_QUEUE") {
       return this.requestReorderQueue(io, db, roomId, proposerAccountId, options);
+    }
+    if (type === "REPLAY_QUEUE_ITEM") {
+      if (getCurrentPlayback(db, roomId)) {
+        return { ok: false, error: "wait until the queue finishes before replaying" };
+      }
+      const queueItemId = options.queueItemId;
+      if (!queueItemId || !getQueueItemById(db, roomId, queueItemId)) {
+        return { ok: false, error: "no such queue item in this room" };
+      }
+      return this.openProposal(io, db, roomId, proposerAccountId,
+        { type, queueItemId }, { kind: "queue", queueRevision: getQueueRevision(db, roomId) }, options);
     }
 
     const playback = getCurrentPlayback(db, roomId);
@@ -350,8 +364,27 @@ export class ProposalManager {
     // before the ballot is recorded, so a failed write never half-counts it.
     touchRoomActivity(db, roomId, nowMs);
     this.active.set(roomId, result.proposal);
-    this.broadcast(io, roomId, result.proposal, false);
     logAction(db, { action: "VOTE_CAST", result: "ok", roomId, accountId, proposalId, detail: choice }, nowMs);
+    // Count actual account identities from server presence, not a client
+    // count or the number of ballots: departed voters cannot stand in for
+    // people who have not voted. Normal quorum/staleness rules still apply.
+    const present = this.presentAccounts?.(roomId);
+    if (present?.length && present.every((id) => result.proposal.votes[id] === "YES" || result.proposal.votes[id] === "NO")) {
+      const timer = this.timers.get(roomId);
+      if (timer) clearTimeout(timer);
+      this.timers.delete(roomId);
+      this.active.delete(roomId);
+      const resolved: Proposal = { ...result.proposal, state: tallyVotes(result.proposal.votes).passed ? "PASSED" : "FAILED" };
+      if (resolved.state === "PASSED") {
+        this.applyPassed(io, db, roomId, resolved);
+      } else {
+        logAction(db, { action: "PROPOSAL_FAIL", result: "ok", roomId,
+          proposalId, accountId: resolved.proposer, detail: resolved.type });
+        this.broadcast(io, roomId, resolved, false);
+      }
+      return { ok: true, proposal: resolved };
+    }
+    this.broadcast(io, roomId, result.proposal, false);
     return { ok: true, proposal: result.proposal };
   }
 
@@ -433,7 +466,6 @@ export class ProposalManager {
     this.invalidateActive(io, roomId);
     const next = advanceToNextTrack(db, roomId);
     io.to(roomId).emit("playback:update", next);
-    if (next) broadcastReactionHistory(io, db, roomId, next.videoId);
     logAction(db, {
       action: "PLAYBACK_CHANGE",
       result: "ok",
@@ -558,6 +590,29 @@ export class ProposalManager {
       return;
     }
 
+    if (resolved.payload.type === "REPLAY_QUEUE_ITEM") {
+      // A track added during voting may already have started. Never replace
+      // that playback or replay an item removed/moved since the request.
+      const queueItemId = resolved.payload.queueItemId;
+      if (getCurrentPlayback(db, roomId) || !getQueueItemById(db, roomId, queueItemId)) {
+        this.broadcast(io, roomId, resolved, false);
+        return;
+      }
+      const started = ensureCurrentTrack(db, roomId, queueItemId);
+      this.broadcast(io, roomId, resolved, started !== null);
+      if (started) {
+        this.endReports.delete(roomId);
+        io.to(roomId).emit("playback:update", started);
+        touchRoomActivity(db, roomId);
+        logAction(db, {
+          action: "PLAYBACK_CHANGE", result: "ok", roomId,
+          proposalId: resolved.proposalId, playbackId: started.playbackId,
+          revision: started.revision, detail: "replay-from-queue-item",
+        });
+      }
+      return;
+    }
+
     if (resolved.type === "SKIP") {
       // advanceToNextTrack returning null just means the queue is now empty
       // (playback stops) — that is a successful skip, not a failure to
@@ -565,7 +620,6 @@ export class ProposalManager {
       const next = advanceToNextTrack(db, roomId);
       this.broadcast(io, roomId, resolved, true);
       io.to(roomId).emit("playback:update", next);
-      if (next) broadcastReactionHistory(io, db, roomId, next.videoId);
       // "successful shared playback action" is meaningful activity
       // (CLAUDE.md's Rooms section) — a successful SKIP unconditionally.
       touchRoomActivity(db, roomId);

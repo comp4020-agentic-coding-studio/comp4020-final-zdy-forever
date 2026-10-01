@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { forwardRef, useEffect, useId, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
 
 // Minimal ambient shape of the bits of the official YouTube IFrame Player
 // API (developers.google.com/youtube/iframe_api_reference) this component
@@ -15,6 +15,8 @@ interface YouTubePlayerInstance {
   getPlayerState(): number;
   mute(): void;
   unMute(): void;
+  setPlaybackRate(rate: number): void;
+  setSize(width: number, height: number): void;
   loadVideoById(videoId: string, startSeconds?: number): void;
   stopVideo(): void;
   destroy(): void;
@@ -30,11 +32,15 @@ interface YouTubeIframeApi {
     element: HTMLElement,
     options: {
       videoId: string;
+      width?: string | number;
+      height?: string | number;
       playerVars?: Record<string, number | string>;
       events?: {
         onReady?: (e: YouTubePlayerEvent) => void;
         onStateChange?: (e: YouTubePlayerEvent) => void;
         onError?: (e: YouTubePlayerEvent) => void;
+        onAutoplayBlocked?: () => void;
+        onPlaybackRateChange?: (e: YouTubePlayerEvent) => void;
       };
     },
   ) => YouTubePlayerInstance;
@@ -108,6 +114,9 @@ export interface YoutubePlayerHandle {
 
 export interface YoutubePlayerProps {
   videoId: string | null;
+  // Local viewing settings never become room state. Reapply the latest room
+  // anchor after the user finishes interacting with YouTube's native menu.
+  onSettingsClosed?: () => void;
   // Relayed verbatim from the IFrame API's onStateChange — a sync layer
   // uses this to know when to suspend/resume its local drift-correction
   // poll (never while BUFFERING/CUED/ENDED/UNSTARTED) and to time its
@@ -131,11 +140,27 @@ export interface YoutubePlayerProps {
 // video), so recreating one on every track change meant tapping "unmute"
 // again for every single song. Mute is a property of the player, so keeping
 // the one player keeps the listener's choice.
+function setPlayerInteraction(container: HTMLDivElement | null, enabled: boolean): void {
+  if (!container) return;
+  container.inert = !enabled;
+  container.style.pointerEvents = enabled ? "auto" : "none";
+  const iframe = container.querySelector("iframe");
+  if (!iframe) return;
+  iframe.inert = !enabled;
+  iframe.tabIndex = enabled ? 0 : -1;
+  iframe.style.pointerEvents = enabled ? "auto" : "none";
+  if (!enabled && document.activeElement === iframe) iframe.blur();
+}
+
 export const YoutubePlayer = forwardRef<YoutubePlayerHandle, YoutubePlayerProps>(function YoutubePlayer(
-  { videoId, onStateChange, onReady },
+  { videoId, onStateChange, onReady, onSettingsClosed },
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const screenId = useId();
+  const [isReady, setIsReady] = useState(false);
+  const [settingsVideoId, setSettingsVideoId] = useState<string | null>(null);
+  const settingsOpen = videoId !== null && settingsVideoId === videoId;
   // Only ever a *ready* player: its methods (getPlayerState, seekTo, ...)
   // only exist once the IFrame API fires onReady, and calling one earlier
   // throws "... is not a function". Until then every handle command is a
@@ -166,6 +191,35 @@ export const YoutubePlayer = forwardRef<YoutubePlayerHandle, YoutubePlayerProps>
   // later track. Purely local: never reported to, or affected by, the
   // server's authoritative anchor.
   const [isMuted, setIsMuted] = useState(true);
+
+  useLayoutEffect(() => {
+    // Apply the lock to the API-created iframe too, including its focus and
+    // tab order. Its controls must stay inert after a local settings session.
+    setPlayerInteraction(containerRef.current, settingsOpen);
+  }, [settingsOpen, isReady]);
+
+  useLayoutEffect(() => {
+    const container = containerRef.current;
+    const player = playerRef.current;
+    if (!isReady || !container || !player) return;
+    let lastWidth = 0;
+    let lastHeight = 0;
+    const resize = () => {
+      const { width, height } = container.getBoundingClientRect();
+      const nextWidth = Math.round(width);
+      const nextHeight = Math.round(height);
+      if (nextWidth <= 0 || nextHeight <= 0 || (nextWidth === lastWidth && nextHeight === lastHeight)) return;
+      lastWidth = nextWidth;
+      lastHeight = nextHeight;
+      // CSS fits the iframe; the API also updates YouTube's internal video
+      // surface, which can otherwise retain its initial 640 × 360 size.
+      player.setSize(nextWidth, nextHeight);
+    };
+    const observer = new ResizeObserver(resize);
+    observer.observe(container);
+    resize();
+    return () => observer.disconnect();
+  }, [isReady]);
 
   useImperativeHandle(
     ref,
@@ -209,6 +263,7 @@ export const YoutubePlayer = forwardRef<YoutubePlayerHandle, YoutubePlayerProps>
   };
 
   useEffect(() => {
+    setSettingsVideoId(null);
     wantedVideoIdRef.current = videoId;
     const ready = playerRef.current;
     if (ready) {
@@ -229,11 +284,17 @@ export const YoutubePlayer = forwardRef<YoutubePlayerHandle, YoutubePlayerProps>
       const firstVideoId = wantedVideoIdRef.current ?? videoId;
       const instance: YouTubePlayerInstance = new YT.Player(host, {
         videoId: firstVideoId,
-        playerVars: { autoplay: 1, playsinline: 1, mute: 1 },
+        width: "100%",
+        height: "100%",
+        // YouTube no longer supports setPlaybackQuality. Its native menu is
+        // needed for quality/caption selection; input stays locked except
+        // while this listener explicitly opens their local settings.
+        playerVars: { autoplay: 1, playsinline: 1, mute: 1, controls: 1, disablekb: 1, fs: 0 },
         events: {
           onReady: () => {
             if (generation !== generationRef.current) return;
             playerRef.current = instance;
+            setIsReady(true);
             loadedVideoIdRef.current = firstVideoId;
             // The wanted video may have changed while this one loaded.
             show(instance, wantedVideoIdRef.current);
@@ -258,7 +319,20 @@ export const YoutubePlayer = forwardRef<YoutubePlayerHandle, YoutubePlayerProps>
             }
             onStateChangeRef.current?.(state);
           },
+          onAutoplayBlocked: () => {
+            if (autoplayPendingRef.current && wantedVideoIdRef.current) {
+              autoplayPendingRef.current = false;
+              setNeedsManualPlay(true);
+            }
+          },
+          onPlaybackRateChange: (e) => {
+            // The native menu also exposes speed. Room synchronization uses
+            // normal speed; only quality and captions are local preferences.
+            if (e.data !== 1) e.target.setPlaybackRate(1);
+          },
           onError: (e) => {
+            setPlayerInteraction(containerRef.current, false);
+            setSettingsVideoId(null);
             setError(ERROR_MESSAGES[e.data ?? -1] ?? "This video can't be played.");
           },
         },
@@ -285,28 +359,69 @@ export const YoutubePlayer = forwardRef<YoutubePlayerHandle, YoutubePlayerProps>
   );
 
   return (
-    <div className="youtube-player">
-      <div ref={containerRef} />
-      {!videoId && <p>No track is playing.</p>}
-      {error && <p role="alert">{error}</p>}
-      <div className="player-fallback-row">
-        {needsManualPlay && !error && (
-          <button type="button" className="btn btn--yellow" onClick={() => playerRef.current?.playVideo()}>
-            ▶ Play
-          </button>
-        )}
-        {videoId && isMuted && !error && (
-          <button
-            type="button"
-            className="btn btn--yellow"
-            onClick={() => {
-              playerRef.current?.unMute();
-              setIsMuted(false);
-            }}
-          >
-            🔇 Tap to unmute
-          </button>
-        )}
+    <div className="youtube-player-region">
+      <div className="player-settings-row">
+        <button
+          type="button"
+          className="btn btn--sm"
+          disabled={!videoId || !isReady || !!error}
+          aria-expanded={settingsOpen}
+          aria-controls={screenId}
+          onClick={(event) => {
+            if (settingsOpen) {
+              // Lock synchronously BEFORE seeking/playing to the room anchor;
+              // React's state update is otherwise committed after the callback.
+              setPlayerInteraction(containerRef.current, false);
+              event.currentTarget.focus();
+              setSettingsVideoId(null);
+              onSettingsClosed?.();
+            } else {
+              setSettingsVideoId(videoId);
+            }
+          }}
+        >
+          {settingsOpen ? "Done · sync with room" : "⚙ Quality / subtitles"}
+        </button>
+        <span>{settingsOpen ? "Only affects your viewing" : "Player controls locked · use room controls"}</span>
+      </div>
+      {settingsOpen && (
+        <p className="player-settings-help">
+          Use the video's ⚙ menu for Quality or Subtitles/CC, or CC to toggle captions.
+          Available options depend on the video and your device. Choose Done to return to room playback.
+        </p>
+      )}
+      <div className="youtube-player-viewport">
+      <div className="youtube-player">
+        {/* Direct input is allowed only while local viewing settings are open. */}
+        <div
+          ref={containerRef}
+          id={screenId}
+          className={`youtube-player-screen${settingsOpen ? " youtube-player-screen--settings" : ""}`}
+          inert={!settingsOpen}
+        />
+        {!videoId && <p>No track is playing.</p>}
+        {error && <p role="alert">{error}</p>}
+        <div className="player-fallback-row">
+          {videoId && needsManualPlay && !error && (
+            <button type="button" className="btn btn--yellow" onClick={() => playerRef.current?.playVideo()}>
+              ▶ Enable playback
+            </button>
+          )}
+          {videoId && isMuted && !error && (
+            <button
+              type="button"
+              className="btn btn--yellow"
+              onClick={() => {
+                if (!playerRef.current) return;
+                playerRef.current.unMute();
+                setIsMuted(false);
+              }}
+            >
+              🔊 Enable sound
+            </button>
+          )}
+        </div>
+      </div>
       </div>
     </div>
   );

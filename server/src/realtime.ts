@@ -1,17 +1,16 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { Server, Socket } from "socket.io";
-import type { ReactionEvent, RoomJoinPayload, RoomSnapshot } from "../../shared/src/types.ts";
-import { computeExpectedPositionMs, toAnchor } from "../../shared/src/playbackSync.ts";
+import { CHAT_MAX_LENGTH, type ChatSendResult, type RoomJoinPayload, type RoomSnapshot } from "../../shared/src/types.ts";
 import type { VoteChoice } from "../../shared/src/voting.ts";
 import { getAccountByClientId } from "./accounts.ts";
 import { logAction } from "./logging.ts";
 import { getCurrentPlayback } from "./playback.ts";
 import { PresenceStore } from "./presence.ts";
+import { DjHandoffManager } from "./djHandoff.ts";
 import { ProposalManager } from "./proposals.ts";
 import { listQueue } from "./queue.ts";
-import { isReactionEmoji, listReactionsForVideo, recordReaction } from "./reactions.ts";
-import { ReactionRateLimiter } from "./reactionRateLimiter.ts";
-import { getRoomById, isRoomMember, joinRoom } from "./rooms.ts";
+import { ChatRateLimiter, listChatMessages, normalizeChatText, recordChatMessage } from "./chat.ts";
+import { getRoomById, isRoomMember, joinRoom, sweepInactiveRooms } from "./rooms.ts";
 
 type JoinErrorReason = "room-not-found" | "room-closed" | "room-full";
 
@@ -81,8 +80,14 @@ function guarded<P>(event: string, reportError: ((error: string) => void) | null
 // real-time room events.
 export function attachRealtime(io: Server, db: DatabaseSync, options: AttachRealtimeOptions = {}): RealtimeHandles {
   const presence = new PresenceStore();
-  const proposals = new ProposalManager();
-  const reactionLimiter = new ReactionRateLimiter();
+  const proposals = new ProposalManager((roomId) => presence.list(roomId).map((person) => person.accountId));
+  const chatLimiter = new ChatRateLimiter();
+  const handoffs = new DjHandoffManager(db, presence, (roomId, playback) => io.to(roomId).emit("playback:update", playback));
+  const handoffSweep = setInterval(guarded("DJ presence check", null, () => {
+    for (const roomId of presence.roomIds()) handoffs.reconcile(roomId);
+  }), 1_000);
+  handoffSweep.unref();
+  io.httpServer?.once("close", () => { clearInterval(handoffSweep); handoffs.dispose(); });
 
   io.use((socket, next) => {
     const auth = socket.handshake.auth as { accountId?: unknown; clientId?: unknown };
@@ -115,7 +120,7 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
     next();
   });
 
-  function leaveCurrentRoom(io: Server, socket: Socket, data: SocketData): void {
+  function leaveCurrentRoom(io: Server, socket: Socket, data: SocketData, reconcile = true): void {
     const roomId = data.roomId;
     if (!roomId) return;
 
@@ -127,12 +132,13 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
       io.to(roomId).emit("presence:leave", { accountId: result.accountId });
       logAction(db, { action: "ROOM_LEAVE", result: "ok", roomId, accountId: result.accountId });
     }
+    if (reconcile) handoffs.reconcile(roomId);
   }
 
   // A room auto-closes once 2 hours pass with no meaningful activity,
   // decided from its stored timestamp whenever something reads it (see
   // rooms.ts's sweep). People can still be in it then — just listening isn't
-  // activity — and they used to stay, still voting and reacting in a room
+  // activity — and they used to stay, still voting and chatting in a room
   // that no longer existed for anyone else. So once it's found closed,
   // everyone in it is told (room:closed) and let go, and any open vote fails.
   // True if the room is closed (everyone now evicted), false if still open.
@@ -141,6 +147,8 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
     if (room && !room.closed) return false;
 
     proposals.closeRoom(io, roomId);
+    handoffs.clear(roomId);
+    chatLimiter.clearRoom(roomId);
     io.to(roomId).emit("room:closed", { roomId });
     for (const socketId of presence.socketIdsIn(roomId)) {
       const socket = io.sockets.sockets.get(socketId);
@@ -152,8 +160,10 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
   // Catches the room nobody touches — a closed room with nobody acting in it
   // would otherwise only be noticed on its members' next action.
   const checkClosedRooms = () => {
+    sweepInactiveRooms(db, Date.now());
     for (const roomId of presence.roomIds()) evictIfClosed(roomId);
   };
+  checkClosedRooms(); // Also purge expired rooms after a server restart.
   const closureCheckMs = options.closureCheckIntervalMs ?? CLOSURE_CHECK_INTERVAL_MS;
   if (closureCheckMs > 0) {
     const timer = setInterval(guarded("closure check", null, checkClosedRooms), closureCheckMs);
@@ -205,7 +215,7 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
       // guarded) leaves it not half-joined: never present without a snapshot.
       const playback = getCurrentPlayback(db, roomId);
       const queue = listQueue(db, roomId);
-      const reactionHistory = playback ? listReactionsForVideo(db, roomId, playback.videoId) : [];
+      const chatMessages = listChatMessages(db, roomId);
 
       socket.join(roomId);
       data.roomId = roomId;
@@ -226,12 +236,31 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
         presence: presence.list(roomId),
         activeProposal: proposals.getActiveProposal(roomId),
         playback,
-        reactionHistory,
+        chatMessages,
       };
       socket.emit("room:snapshot", snapshot);
 
       if (becamePresent) {
         socket.to(roomId).emit("presence:join", { accountId: data.accountId, displayName: data.displayName });
+      }
+      handoffs.reconcile(roomId);
+    }));
+
+    socket.on("room:leave", guarded("room:leave", reportTo("room:leaveError"), () => {
+      const roomId = data.roomId;
+      if (!roomId || evictIfClosed(roomId)) return;
+      const handoff = handoffs.requestLeave(roomId, data.accountId, () => {
+        if (data.roomId === roomId) leaveCurrentRoom(io, socket, data, false);
+        socket.emit("room:left", { roomId });
+      });
+      if (handoff) socket.emit("dj:handoff", handoff);
+    }));
+
+    socket.on("dj:choose", guarded("dj:choose", reportTo("room:leaveError"), (payload: { requestId?: unknown; accountId?: unknown }) => {
+      if (!data.roomId || evictIfClosed(data.roomId)) return;
+      if (typeof payload?.requestId !== "string" || typeof payload?.accountId !== "string" ||
+          !handoffs.choose(data.roomId, data.accountId, payload.requestId, payload.accountId)) {
+        socket.emit("room:leaveError", { error: "That member is no longer available. Choose another member or wait for automatic assignment." });
       }
     }));
 
@@ -265,7 +294,8 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
           type !== "SKIP" &&
           type !== "SEEK" &&
           type !== "REMOVE_QUEUE_ITEM" &&
-          type !== "REORDER_QUEUE"
+          type !== "REORDER_QUEUE" &&
+          type !== "REPLAY_QUEUE_ITEM"
         ) {
           socket.emit("proposal:requestError", { error: "unsupported proposal type" });
           return;
@@ -333,55 +363,31 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
       });
     }));
 
-    // Reactions never require voting (CLAUDE.md's Reactions/Voting
-    // sections) — the only gates are room membership, a valid emoji from
-    // the fixed set, an actually-playing track, and the rate limiter.
-    // positionMs is always server-computed here, never a client-claimed
-    // value (CLAUDE.md's Authority section).
-    socket.on("reaction:send", guarded("reaction:send", reportTo("reaction:sendError"), (payload: { reaction?: unknown }) => {
-      if (!data.roomId) {
-        socket.emit("reaction:sendError", { error: "join a room before reacting" });
-        return;
-      }
-      if (evictIfClosed(data.roomId)) {
-        socket.emit("reaction:sendError", { error: ROOM_CLOSED_MESSAGE });
-        return;
-      }
-      if (!isReactionEmoji(payload?.reaction)) {
-        socket.emit("reaction:sendError", { error: "unsupported reaction" });
-        return;
-      }
-      const playback = getCurrentPlayback(db, data.roomId);
-      if (!playback) {
-        socket.emit("reaction:sendError", { error: "nothing is currently playing" });
-        return;
-      }
-      const nowMs = Date.now();
-      if (!reactionLimiter.tryConsume(data.roomId, data.accountId, nowMs)) {
-        socket.emit("reaction:sendError", { error: "slow down — too many reactions" });
-        return;
-      }
-      const positionMs = computeExpectedPositionMs(toAnchor(playback), nowMs);
-      const reaction = recordReaction(db, {
-        roomId: data.roomId,
-        videoId: playback.videoId,
-        playbackId: playback.playbackId,
-        accountId: data.accountId,
-        displayName: data.displayName,
-        reaction: payload.reaction,
-        positionMs,
-        nowMs,
-      });
-      const event: ReactionEvent = { kind: "LIVE", reaction };
-      io.to(data.roomId).emit("reaction:new", event);
-      logAction(db, {
-        action: "REACTION_CREATE",
-        result: "ok",
-        roomId: data.roomId,
-        accountId: data.accountId,
-        playbackId: playback.playbackId,
-      });
-    }));
+    // Chat is available with or without a playing track. The authenticated
+    // socket's current room and account are the only accepted identities.
+    socket.on("chat:send", (payload: { text?: unknown }, acknowledge: unknown) => {
+      const reply = (result: ChatSendResult) => {
+        if (typeof acknowledge === "function") acknowledge(result);
+      };
+      const fail = (error: string) => {
+        socket.emit("chat:sendError", { error });
+        reply({ ok: false, error });
+      };
+      guarded("chat:send", fail, (input: { text?: unknown }) => {
+        if (!data.roomId) return fail("join a room before chatting");
+        if (evictIfClosed(data.roomId)) return fail(ROOM_CLOSED_MESSAGE);
+        const text = normalizeChatText(input?.text);
+        if (text === null) return fail(`messages must contain 1–${CHAT_MAX_LENGTH} characters`);
+        const nowMs = Date.now();
+        if (!chatLimiter.tryConsume(data.roomId, data.accountId, nowMs)) {
+          return fail("slow down — too many messages");
+        }
+        const message = recordChatMessage(db, data.roomId, data.accountId, text, nowMs);
+        io.to(data.roomId).emit("chat:new", message);
+        logAction(db, { action: "CHAT_SEND", result: "ok", roomId: data.roomId, accountId: data.accountId });
+        reply({ ok: true });
+      })(payload);
+    });
 
     socket.on("disconnect", guarded("disconnect", null, () => {
       // A participant disconnecting mid-vote is not special-cased: they

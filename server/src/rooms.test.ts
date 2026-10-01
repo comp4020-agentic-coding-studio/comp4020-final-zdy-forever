@@ -314,7 +314,7 @@ describe("rooms", () => {
       expect(isAutoCloseDue(room, created + AUTO_CLOSE_INACTIVITY_MS + 1_000_000)).toBe(true);
     });
 
-    it("isAutoCloseDue is always false when autoCloseEnabled is off, no matter how stale", () => {
+    it("cannot disable automatic closure via an older client's request", () => {
       const room = createRoom(db, {
         accountId: creatorAccountId,
         name: "Forever room",
@@ -323,7 +323,8 @@ describe("rooms", () => {
       });
       const created = Date.parse(room.createdAt);
 
-      expect(isAutoCloseDue(room, created + AUTO_CLOSE_INACTIVITY_MS * 100)).toBe(false);
+      expect(room.autoCloseEnabled).toBe(true);
+      expect(isAutoCloseDue(room, created + AUTO_CLOSE_INACTIVITY_MS)).toBe(true);
     });
 
     it("isAutoCloseDue is always false for a room already marked closed", () => {
@@ -365,7 +366,7 @@ describe("rooms", () => {
       expect(raw.closed).toBe(1);
     });
 
-    it("a room with autoCloseEnabled off is never swept closed, no matter how old its activity timestamp", () => {
+    it("sweeps legacy rooms even if their stored auto-close flag is off", () => {
       const room = createRoom(db, {
         accountId: creatorAccountId,
         name: "Never auto-closes",
@@ -377,8 +378,9 @@ describe("rooms", () => {
         room.roomId,
       );
 
-      const found = getRoomById(db, room.roomId, T0 + AUTO_CLOSE_INACTIVITY_MS * 100);
-      expect(found?.closed).toBe(false);
+      db.prepare("UPDATE rooms SET autoCloseEnabled = 0 WHERE roomId = ?").run(room.roomId);
+      const found = getRoomById(db, room.roomId, T0 + AUTO_CLOSE_INACTIVITY_MS);
+      expect(found?.closed).toBe(true);
     });
 
     it("touchRoomActivity delays closure by resetting the inactivity window", () => {

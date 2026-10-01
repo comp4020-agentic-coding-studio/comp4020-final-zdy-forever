@@ -1,7 +1,7 @@
 :root {
   color-scheme: light;
 
-  /* ---- Echo Room candy palette --------------------------------------- */
+  /* ---- Watch YouTube Together candy palette --------------------------------------- */
   --candy-pink: #ff5ca8;
   --candy-pink-dark: #d6338a;
   --candy-red: #ff4d5e;
@@ -69,41 +69,6 @@ button {
   gap: clamp(1rem, 2.5vw, 1.75rem);
 }
 
-.app-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 0.75rem;
-}
-
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-}
-
-.brand-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 3rem;
-  height: 3rem;
-  border-radius: var(--radius-full);
-  background: var(--candy-purple);
-  border: var(--border-w) solid var(--ink);
-  box-shadow: var(--pop-shadow);
-  font-size: 1.5rem;
-  transform: rotate(-6deg);
-}
-
-.brand h1 {
-  margin: 0;
-  font-size: clamp(1.5rem, 2.5vw, 2rem);
-  font-weight: 800;
-  letter-spacing: -0.02em;
-}
-
 .status-pill {
   display: inline-flex;
   align-items: center;
@@ -129,59 +94,77 @@ button {
   background: var(--candy-green);
 }
 
-.status-pill--error::before {
-  background: var(--candy-red);
-}
-
-/* Reused for both the pre-room setup area and the live room's grid — a
-   plain vertical stack of cards. */
+/* A vertical stack, shared by lobby cards and room columns. */
 .section-stack {
   display: flex;
   flex-direction: column;
   gap: clamp(1rem, 2.5vw, 1.5rem);
 }
 
-/* The player itself is always rendered above this grid (CLAUDE.md: keep it
-   visible even with no room joined). Inside the grid, the remaining
-   hierarchy is vote > DJ+listeners > queue > reactions. Desktop
-   arranges these into two columns via grid-template-areas; collapsing to a
-   single-column `grid-template-areas` list at the mobile breakpoint
-   reproduces the exact same priority order top-to-bottom, independent of DOM
-   order, so no JS/markup reshuffling is needed to keep both breakpoints
-   correct. */
-.room-grid {
+.add-link-section {
+  width: 100%;
+}
+
+.add-link-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  width: 100%;
+}
+.add-link-result { font-size: 0.85rem; font-weight: 700; white-space: nowrap; }
+.add-link-result--success { color: #137348; }
+.add-link-result--failed { color: #b91c1c; }
+
+.app-shell--room {
+  max-width: none;
+}
+
+.room-layout {
   display: grid;
   gap: clamp(1rem, 2.5vw, 1.5rem);
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-areas:
-    "vote"
-    "dj"
-    "queue"
-    "reactions";
+    "main"
+    "social"
+    "queue";
+  align-items: start;
 }
 
-@media (min-width: 960px) {
-  .room-grid {
-    grid-template-columns: minmax(360px, 3fr) minmax(320px, 2fr);
+.room-layout > * { min-width: 0; }
+.room-main-column { grid-area: main; }
+.room-social-column { grid-area: social; }
+.room-queue-column { grid-area: queue; }
+
+.room-layout .card {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.room-layout input { min-width: 0; max-width: 100%; }
+.add-link-section input { flex: 1 1 12rem; width: 100%; }
+.room-layout .queue-heading { flex-wrap: wrap; }
+
+/* Give the first available sidebar to the controls and conversation. */
+@media (min-width: 1000px) {
+  .room-layout {
+    grid-template-columns: 320px minmax(0, 1fr);
     grid-template-areas:
-      "vote   queue"
-      "dj     queue"
-      "reactions queue";
-    align-items: start;
+      "social main"
+      "social queue";
   }
+
+  .room-social-column .card,
+  .room-queue-column .card { padding: 1rem; }
+  .room-social-column .chat-feed { height: clamp(14rem, 30vh, 22rem); }
+  .room-social-column .chat-send { padding: 0.5rem 0.7rem; }
 }
 
-.card--vote {
-  grid-area: vote;
-}
-.card--dj {
-  grid-area: dj;
-}
-.card--queue {
-  grid-area: queue;
-}
-.card--reactions {
-  grid-area: reactions;
+/* Wide screens use both margins while keeping the video the largest column. */
+@media (min-width: 1440px) {
+  .room-layout {
+    grid-template-columns: 320px minmax(0, 1fr) 340px;
+    grid-template-areas: "social main queue";
+  }
 }
 
 /* ============================================================== cards */
@@ -295,6 +278,64 @@ button {
 }
 
 /* ============================================================== forms */
+
+.seek-control { max-width: 100%; }
+.seek-control--open {
+  flex: 1 1 100%;
+  min-width: 0;
+  padding: 0.75rem;
+  border: var(--border-w) solid var(--ink);
+  border-radius: var(--radius-md);
+  background: var(--candy-purple);
+  box-shadow: var(--pop-shadow-sm);
+}
+.seek-control--open .seek-toggle {
+  padding: 0 0 0.65rem;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  transform: none;
+}
+.seek-form { width: 100%; }
+.seek-time-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+  width: 100%;
+}
+.seek-time-fields label { position: relative; min-width: 0; font-size: 0.75rem; font-weight: 700; }
+.seek-time-fields label + label::before {
+  content: ":";
+  position: absolute;
+  left: -0.5rem;
+  bottom: 0.55rem;
+  font-size: 1rem;
+}
+.seek-time-fields input {
+  width: 100%;
+  margin-top: 0.3rem;
+  padding: 0.5rem 0.35rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.seek-form [role="alert"] { margin: 0; font-size: 0.85rem; }
+
+.dj-handoff-dialog {
+  width: min(32rem, calc(100% - 2rem));
+  max-height: calc(100dvh - 2rem);
+  overflow: auto;
+  color: var(--ink);
+}
+
+.dj-handoff-dialog::backdrop {
+  background: rgb(25 18 43 / 55%);
+}
+
+.dj-handoff-members {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
 
 input[type="text"],
 input[type="number"],
@@ -418,6 +459,7 @@ form {
 /* ============================================================ room bar */
 
 .room-bar {
+  position: relative;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -427,6 +469,26 @@ form {
   border-radius: var(--radius-lg);
   box-shadow: var(--card-shadow);
   padding: 0.6rem 0.9rem;
+}
+
+.room-members-toggle {
+  cursor: pointer;
+  color: var(--ink);
+}
+
+.room-members-toggle[aria-expanded="true"] {
+  background: var(--candy-purple);
+}
+
+.room-members-panel {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 0.65rem);
+  right: 0.9rem;
+  width: min(24rem, calc(100% - 1.8rem));
+  max-height: min(28rem, 65dvh);
+  overflow: auto;
+  overflow-wrap: anywhere;
 }
 
 .room-bar-name {
@@ -500,7 +562,15 @@ form {
   overflow-y: auto;
 }
 
+/* Give the room queue enough space for at least three typical wrapped rows,
+   including their controls on mobile. Keep the lobby list's sizing separate. */
+.card--queue .queue-list {
+  min-height: 28rem;
+  max-height: 40rem;
+}
+
 .queue-item {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -570,6 +640,19 @@ form {
 
 /* ======================================================= YouTube player */
 
+.player-settings-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.player-settings-row span,
+.player-settings-help {
+  font-size: 0.85rem;
+}
+
 .youtube-player {
   position: relative;
   aspect-ratio: 16 / 9;
@@ -583,9 +666,26 @@ form {
   flex-direction: column;
 }
 
-.youtube-player > div:first-child {
+.youtube-player-screen {
+  position: relative;
   flex: 1 1 auto;
   min-height: 0;
+  pointer-events: none;
+}
+
+.youtube-player-screen--settings {
+  pointer-events: auto;
+}
+
+/* The API inserts a fixed-size iframe. Fit it to the responsive viewport
+   instead of leaving unused space to its right and below. */
+.youtube-player-screen iframe {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
 }
 
 .youtube-player p {
@@ -606,87 +706,179 @@ form {
   gap: 0.5rem;
 }
 
-/* ============================================================ reactions */
+/* ================================================================ chat */
 
-.reactions-bar {
-  display: flex;
-  gap: 0.5rem;
-}
-
-.reaction-button {
-  font-size: 1.6rem;
-  line-height: 1;
-  width: 2.75rem;
-  height: 2.75rem;
-  border-radius: var(--radius-full);
-  border: var(--border-w) solid var(--ink);
-  background: #fff;
-  cursor: pointer;
-  box-shadow: var(--pop-shadow-sm);
-  transition: transform 0.15s var(--bounce);
-}
-
-.reaction-button:hover {
-  transform: translateY(-2px) scale(1.05);
-}
-
-.reaction-button:active {
-  transform: translateY(2px) scale(0.95);
-}
-
-.reactions-feed {
+.card--chat { min-width: 0; }
+.chat-heading {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
-  min-height: 1.8rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin-bottom: 0.9rem;
+}
+.chat-heading h2 { margin: 0; }
+.chat-empty { font-size: 0.9rem; opacity: 0.75; }
+.chat-feed {
+  height: 20rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  border: 2px solid var(--ink);
+  border-radius: var(--radius-md);
+  background: #fff;
+}
+.chat-message {
+  flex-shrink: 0;
+  padding: 0.6rem 0.75rem;
+  border-radius: var(--radius-md);
+  background: var(--cream);
+  overflow-wrap: anywhere;
+}
+.chat-message--self { background: color-mix(in srgb, var(--candy-yellow) 35%, #fff); }
+.chat-message-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.5rem; font-size: 0.8rem; }
+.chat-message-meta time { opacity: 0.7; }
+.chat-message p { margin: 0.4rem 0 0; white-space: pre-wrap; }
+.chat-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
   margin-top: 0.75rem;
 }
-
-.reaction-bubble {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  padding: 0.25rem 0.7rem;
-  border-radius: 999px;
+.chat-input-wrap { min-width: 0; }
+.chat-form textarea {
+  display: block;
+  width: 100%;
+  min-height: 6rem;
+  resize: vertical;
+  padding: 0.6rem 0.8rem;
   border: 2px solid var(--ink);
-  background: var(--cream);
-  font-size: 0.85rem;
-  font-weight: 700;
-  animation: reaction-pop 0.3s var(--bounce);
+  border-radius: var(--radius-md);
+  font: inherit;
+  background: #fff;
+  color: var(--ink);
 }
-
-.reaction-bubble--echo {
-  opacity: 0.75;
-  font-style: italic;
-  border-style: dashed;
+.chat-send-column {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
 }
-
-@keyframes reaction-pop {
-  from {
-    transform: scale(0.5);
-    opacity: 0;
-  }
-  to {
-    transform: scale(1);
-    opacity: 1;
-  }
+.chat-count {
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-soft);
 }
+.chat-send { white-space: nowrap; }
+.chat-form > [role="alert"] { grid-column: 1 / -1; margin: 0; }
 
-/* CLAUDE.md: respect prefers-reduced-motion — no pop/scale/bounce
-   animation, just a plain fade / instant state change for anyone who has
-   asked for reduced motion. */
 @media (prefers-reduced-motion: reduce) {
-  .reaction-bubble {
-    animation: none;
-  }
-  .btn,
-  .reaction-button {
-    transition: none;
-  }
+  .btn { transition: none; }
 }
 
 .footer-note {
   text-align: center;
   font-size: 0.85rem;
   color: var(--ink-soft);
+}
+
+/* One viewport on wide screens. Scale from a 1920 × 960 reference while
+   respecting the shorter axis, so high-resolution displays grow together.
+   Smaller windows keep the stacked, document-scrolling layout above. */
+@media (min-width: 1440px) {
+  :root:has(.app-shell--room) {
+    font-size: clamp(12px, min(0.833333vw, 1.666667dvh), 32px);
+  }
+
+  .app-shell--room {
+    --room-gap: 1.25rem;
+    --radius-lg: 1.75rem;
+    --radius-md: 1.125rem;
+    --border-w: 0.1875rem;
+    height: 100dvh;
+    min-height: 0;
+    padding: var(--room-gap);
+    gap: var(--room-gap);
+    overflow: clip;
+  }
+  .app-shell--room > .room-bar { flex: 0 0 auto; }
+  .app-shell--room > [role="alert"] { flex: 0 0 auto; margin: 0; }
+
+  .room-layout {
+    flex: 1 1 0;
+    min-height: 0;
+    grid-template-columns: 20rem minmax(0, 1fr) 21.25rem;
+    grid-template-rows: minmax(0, 1fr);
+    gap: var(--room-gap);
+    align-items: stretch;
+  }
+  .room-layout > .section-stack {
+    height: 100%;
+    min-height: 0;
+    gap: var(--room-gap);
+  }
+
+  .card--vote { flex: 0 1 auto; max-height: 55%; overflow: auto; }
+  .card--vote > .btn-row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+  }
+  .card--vote > .btn-row .btn {
+    width: 100%;
+    padding: 0.6rem 0.4rem;
+    font-size: 0.85rem;
+  }
+  .card--vote .seek-control--open { grid-column: 1 / -1; }
+  .room-queue-column > .add-link-section { flex: 0 0 auto; }
+
+  .room-layout .card--chat,
+  .room-layout .card--queue,
+  .room-layout .card--player {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 0;
+    min-height: 0;
+  }
+  .chat-heading, .chat-form, .queue-heading { flex: 0 0 auto; }
+  .room-social-column .chat-feed,
+  .card--queue .queue-list {
+    flex: 1 1 0;
+    height: 0 !important; /* Queue anchoring must not grow the viewport. */
+    min-height: 0;
+    max-height: none;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .room-social-column .chat-form textarea {
+    height: 5rem;
+    min-height: 5rem;
+    resize: none;
+  }
+
+  .card--player > h2,
+  .card--player > p { flex: 0 0 auto; }
+  .card--player > p { margin: 0.65rem 0 0; }
+  .youtube-player-region {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 0;
+    min-height: 0;
+  }
+  .player-settings-row, .player-settings-help { flex: 0 0 auto; }
+  .youtube-player-viewport {
+    flex: 1 1 0;
+    min-height: 0;
+    display: grid;
+    place-items: center;
+    container-type: size;
+  }
+  .youtube-player {
+    width: min(100cqw, calc(100cqh * 16 / 9));
+    border-width: 0.25rem;
+  }
 }
