@@ -142,7 +142,7 @@ button {
 
 .room-layout input { min-width: 0; max-width: 100%; }
 .add-link-section input { flex: 1 1 12rem; width: 100%; }
-.room-layout .queue-heading { flex-wrap: wrap; }
+.room-layout .queue-heading, .room-layout .player-heading { flex-wrap: wrap; }
 
 /* Give the first available sidebar to the controls and conversation. */
 @media (min-width: 1000px) {
@@ -640,6 +640,23 @@ form {
 
 /* ======================================================= YouTube player */
 
+.player-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin-bottom: 0.9rem;
+}
+
+.player-heading h2 {
+  margin: 0;
+}
+
+.player-settings-slot {
+  display: flex;
+  align-items: center;
+}
+
 .player-settings-row {
   display: flex;
   align-items: center;
@@ -648,7 +665,6 @@ form {
   margin-bottom: 0.75rem;
 }
 
-.player-settings-row span,
 .player-settings-help {
   font-size: 0.85rem;
 }
@@ -780,12 +796,6 @@ form {
   .btn { transition: none; }
 }
 
-.footer-note {
-  text-align: center;
-  font-size: 0.85rem;
-  color: var(--ink-soft);
-}
-
 /* One viewport on wide screens. Scale from a 1920 × 960 reference while
    respecting the shorter axis, so high-resolution displays grow together.
    Smaller windows keep the stacked, document-scrolling layout above. */
@@ -860,7 +870,7 @@ form {
     resize: none;
   }
 
-  .card--player > h2,
+  .card--player > .player-heading,
   .card--player > p { flex: 0 0 auto; }
   .card--player > p { margin: 0.65rem 0 0; }
   .youtube-player-region {

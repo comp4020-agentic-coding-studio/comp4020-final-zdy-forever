@@ -226,7 +226,7 @@ describe("YoutubePlayer", () => {
     expect(document.activeElement).toBe(toggle());
     await render("firstSong01", undefined, resync);
     expect(iframe.style.pointerEvents).toBe("none");
-    expect(container.textContent).toContain("Player controls locked");
+    expect(toggle().textContent).toBe("⚙ Quality / subtitles");
     expect(created).toHaveLength(1);
     expect(created[0].player.loadVideoById).not.toHaveBeenCalled();
     expect(created[0].player.destroy).not.toHaveBeenCalled();

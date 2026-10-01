@@ -58,6 +58,9 @@ function App() {
   const [roomActionError, setRoomActionError] = useState<string | null>(null);
   const [liveRoomId, setLiveRoomId] = useState<string | null>(null);
   const playerRef = useRef<YoutubePlayerHandle | null>(null);
+  // Portal target for the quality/subtitles toggle, so it renders in the
+  // "Now playing" header (top-right) rather than YoutubePlayer's own layout.
+  const [settingsSlot, setSettingsSlot] = useState<HTMLDivElement | null>(null);
 
   // Local drag UI state only — never authoritative. The actual reorder is
   // requested as a REORDER_QUEUE proposal and only ever takes effect via the
@@ -276,24 +279,22 @@ function App() {
   // YouTube player visible). The lobby has nothing to play, so no player.
   const playerCard = (
     <div className="card card--player card--accent-pink">
-      <h2>🎬 Now playing</h2>
+      <div className="player-heading">
+        <h2>🎬 Now playing</h2>
+        <div className="player-settings-slot" ref={setSettingsSlot} />
+      </div>
       <YoutubePlayer
         ref={playerRef}
         videoId={live.playback?.videoId ?? null}
         onStateChange={live.handlePlayerStateChange}
         onReady={live.handlePlayerReady}
         onSettingsClosed={live.handlePlayerReady}
+        settingsSlot={settingsSlot}
       />
       {live.playback && (
-        <>
-          <p>
-            <strong>{live.playback.title}</strong> — {live.playback.channelTitle}
-          </p>
-          <p className="footer-note">
-            status: {live.playback.status} · playbackId: {live.playback.playbackId} · revision:{" "}
-            {live.playback.revision}
-          </p>
-        </>
+        <p>
+          <strong>{live.playback.title}</strong> — {live.playback.channelTitle}
+        </p>
       )}
     </div>
   );

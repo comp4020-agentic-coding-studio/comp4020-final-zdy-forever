@@ -1,4 +1,5 @@
 import { forwardRef, useEffect, useId, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 // Minimal ambient shape of the bits of the official YouTube IFrame Player
 // API (developers.google.com/youtube/iframe_api_reference) this component
@@ -129,6 +130,12 @@ export interface YoutubePlayerProps {
   // no-op or aimed at the previous video, so this is its cue to apply the
   // current anchor again.
   onReady?: () => void;
+  // Where to portal the quality/subtitles toggle button — its parent wants
+  // it sitting in its own header (e.g. top-right of "Now playing") rather
+  // than in this component's own layout. Falls back to a plain row above
+  // the viewport when not given, so standalone usage (and this component's
+  // own tests) keep working without one.
+  settingsSlot?: HTMLElement | null;
 }
 
 // Always rendered, with or without a videoId — CLAUDE.md requires the
@@ -153,7 +160,7 @@ function setPlayerInteraction(container: HTMLDivElement | null, enabled: boolean
 }
 
 export const YoutubePlayer = forwardRef<YoutubePlayerHandle, YoutubePlayerProps>(function YoutubePlayer(
-  { videoId, onStateChange, onReady, onSettingsClosed },
+  { videoId, onStateChange, onReady, onSettingsClosed, settingsSlot },
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -358,38 +365,34 @@ export const YoutubePlayer = forwardRef<YoutubePlayerHandle, YoutubePlayerProps>
     [],
   );
 
+  const settingsButton = (
+    <button
+      type="button"
+      className="btn btn--sm player-settings-toggle"
+      disabled={!videoId || !isReady || !!error}
+      aria-expanded={settingsOpen}
+      aria-controls={screenId}
+      onClick={(event) => {
+        if (settingsOpen) {
+          // Lock synchronously BEFORE seeking/playing to the room anchor;
+          // React's state update is otherwise committed after the callback.
+          setPlayerInteraction(containerRef.current, false);
+          event.currentTarget.focus();
+          setSettingsVideoId(null);
+          onSettingsClosed?.();
+        } else {
+          setSettingsVideoId(videoId);
+        }
+      }}
+    >
+      {settingsOpen ? "Done · sync with room" : "⚙ Quality / subtitles"}
+    </button>
+  );
+
   return (
     <div className="youtube-player-region">
-      <div className="player-settings-row">
-        <button
-          type="button"
-          className="btn btn--sm"
-          disabled={!videoId || !isReady || !!error}
-          aria-expanded={settingsOpen}
-          aria-controls={screenId}
-          onClick={(event) => {
-            if (settingsOpen) {
-              // Lock synchronously BEFORE seeking/playing to the room anchor;
-              // React's state update is otherwise committed after the callback.
-              setPlayerInteraction(containerRef.current, false);
-              event.currentTarget.focus();
-              setSettingsVideoId(null);
-              onSettingsClosed?.();
-            } else {
-              setSettingsVideoId(videoId);
-            }
-          }}
-        >
-          {settingsOpen ? "Done · sync with room" : "⚙ Quality / subtitles"}
-        </button>
-        <span>{settingsOpen ? "Only affects your viewing" : "Player controls locked · use room controls"}</span>
-      </div>
-      {settingsOpen && (
-        <p className="player-settings-help">
-          Use the video's ⚙ menu for Quality or Subtitles/CC, or CC to toggle captions.
-          Available options depend on the video and your device. Choose Done to return to room playback.
-        </p>
-      )}
+      {settingsSlot ? createPortal(settingsButton, settingsSlot) : <div className="player-settings-row">{settingsButton}</div>}
+      {settingsOpen && <p className="player-settings-help">Choose Done to return to room playback.</p>}
       <div className="youtube-player-viewport">
       <div className="youtube-player">
         {/* Direct input is allowed only while local viewing settings are open. */}
