@@ -86,6 +86,16 @@ export function usePlaybackSync(
   const wasPlayingRef = useRef(false);
   const socketRef = useRef<Socket | null>(null);
   const finishedRef = useRef<{ playbackId: string; revision: number; reported: boolean } | null>(null);
+  // Which videoId the local player has actually rendered a frame of —
+  // cleared on every fresh load (handlePlayerReady), not merely every
+  // playback/anchor change, since a replayed or re-queued video reloads from
+  // scratch with nothing rendered yet even though its videoId repeats. See
+  // applyAnchor's PAUSED branch for why this matters.
+  const renderedVideoIdRef = useRef<string | null>(null);
+  // True while a forced seek+play is only there to make YouTube paint a
+  // frame at the target position — the next PLAYING confirmation parks it
+  // right back at that position instead of letting it actually resume.
+  const pendingParkRef = useRef(false);
 
   // While the server gathers end reports, an old PLAYING anchor keeps
   // advancing. Never reload/seek beyond the video's end: YouTube can restart
@@ -119,6 +129,10 @@ export function usePlaybackSync(
       if (!playback || playback.playbackId !== playbackRef.current?.playbackId || playback.revision !== playbackRef.current?.revision) {
         finishedRef.current = null;
         wasPlayingRef.current = false;
+        // A superseded anchor invalidates any nudge still waiting on its own
+        // PLAYING confirmation — the next one it sees belongs to whatever
+        // this call is about to do instead.
+        pendingParkRef.current = false;
       }
       playbackRef.current = playback;
       const player = playerRef.current;
@@ -140,11 +154,23 @@ export function usePlaybackSync(
       if (playback.status === "PLAYING") {
         player.seekTo(expectedMs / 1000);
         player.playVideo();
-      } else {
-        // Pause first: a paused YouTube player stays paused when it seeks,
-        // so parking it can never itself set it playing again.
+      } else if (renderedVideoIdRef.current === playback.videoId) {
+        // This video has already painted at least one frame (it was
+        // genuinely playing a moment ago), so pausing in place is instant
+        // and safe: a paused player stays paused when it seeks.
         player.pauseVideo();
         player.seekTo(expectedMs / 1000);
+      } else {
+        // Nothing has ever been rendered for this load (a fresh player, a
+        // reconnect, a track switch, or a replay all land here first).
+        // Seeking a never-played video straight to a PAUSED position can
+        // leave YouTube's canvas solid black — it has no decoded frame to
+        // show yet. Seek and let it actually play; the first PLAYING
+        // confirmation (handlePlayerStateChange) re-pauses it right there,
+        // by which point a real frame exists.
+        pendingParkRef.current = true;
+        player.seekTo(expectedMs / 1000);
+        player.playVideo();
       }
     },
     [playerRef, holdFinishedPlayback],
@@ -294,6 +320,10 @@ export function usePlaybackSync(
   // loop below never runs to correct it. Re-applying the latest anchor once
   // the player is ready with the room's video fixes both.
   const handlePlayerReady = useCallback(() => {
+    // A fresh load, whatever the reason — nothing of this video is on
+    // screen yet (see applyAnchor's PAUSED branch).
+    renderedVideoIdRef.current = null;
+    pendingParkRef.current = false;
     applyAnchor(playbackRef.current);
   }, [applyAnchor]);
 
@@ -396,6 +426,17 @@ export function usePlaybackSync(
         return;
       }
       if (playerRef.current?.getVideoId() !== current.videoId) return;
+      if (playerState === YT_PLAYER_STATE.PLAYING) {
+        renderedVideoIdRef.current = current.videoId;
+        // Our own forced nudge (applyAnchor's PAUSED branch) confirming it
+        // actually painted a frame — park it right here instead of letting
+        // it run, and skip straight past every other PLAYING branch below.
+        if (pendingParkRef.current) {
+          pendingParkRef.current = false;
+          playerRef.current?.pauseVideo();
+          return;
+        }
+      }
       // The room is paused but this player just started — someone pressed
       // YouTube's own play button. Only the room decides; letting it run
       // meant the track could play (and end) here while the room stayed put.

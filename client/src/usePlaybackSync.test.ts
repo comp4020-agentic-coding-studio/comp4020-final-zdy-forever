@@ -142,6 +142,45 @@ describe("usePlaybackSync", () => {
     player.ready = true;
     act(() => hook.handlePlayerReady());
 
+    // Never-rendered video: seeks and plays first rather than pausing
+    // straight away (see the next test for why), then parks once the real
+    // player confirms it actually painted a frame there.
+    expect(player.commands).toEqual(["seekTo(42)", "play"]);
+    act(() => hook.handlePlayerStateChange(YT_PLAYER_STATE.PLAYING));
+    expect(player.commands).toEqual(["seekTo(42)", "play", "pause"]);
+  });
+
+  // Regression: pausing a video the player has never actually played (a
+  // fresh load, straight to a PAUSED anchor) can leave YouTube's canvas
+  // solid black — it has no decoded frame to show yet, and seeking alone
+  // doesn't force one. This is exactly what a sole listener hits returning
+  // to an empty room after the server (or a scale-to-zero Fly machine) has
+  // restarted and recovered the track as PAUSED.
+  it("never leaves a never-played video paused on a blank frame — it plays briefly first, then parks", () => {
+    deliver("room:snapshot", snapshot(playback({ status: "PAUSED", anchorPositionMs: 42_000 })));
+    player.ready = true;
+    act(() => hook.handlePlayerReady());
+    expect(player.commands).toEqual(["seekTo(42)", "play"]);
+
+    // The real IFrame API wouldn't confirm PLAYING instantly; nothing else
+    // should happen until it does.
+    act(() => vi.advanceTimersByTime(500));
+    expect(player.commands).toEqual(["seekTo(42)", "play"]);
+
+    act(() => hook.handlePlayerStateChange(YT_PLAYER_STATE.PLAYING));
+    expect(player.commands).toEqual(["seekTo(42)", "play", "pause"]);
+  });
+
+  it("pauses a video that was already rendering immediately, with no play-flash nudge needed", () => {
+    deliver("room:snapshot", snapshot(playback({ status: "PLAYING", anchorPositionMs: 0 })));
+    player.ready = true;
+    act(() => hook.handlePlayerReady());
+    expect(player.commands).toEqual(["seekTo(0)", "play"]);
+    act(() => hook.handlePlayerStateChange(YT_PLAYER_STATE.PLAYING));
+    player.commands.length = 0;
+
+    deliver("playback:update", playback({ status: "PAUSED", anchorPositionMs: 42_000, revision: 2 }));
+
     expect(player.commands).toEqual(["pause", "seekTo(42)"]);
   });
 
@@ -441,6 +480,8 @@ describe("usePlaybackSync", () => {
     player.ready = true;
     act(() => hook.handlePlayerReady());
 
-    expect(player.commands).toEqual(["pause", "seekTo(7)"]);
+    expect(player.commands).toEqual(["seekTo(7)", "play"]);
+    act(() => hook.handlePlayerStateChange(YT_PLAYER_STATE.PLAYING));
+    expect(player.commands).toEqual(["seekTo(7)", "play", "pause"]);
   });
 });
