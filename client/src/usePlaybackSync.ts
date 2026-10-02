@@ -13,6 +13,7 @@ import type {
 } from "../../shared/src/types.ts";
 import type { Proposal, ProposalBroadcast, VoteChoice } from "../../shared/src/voting.ts";
 import { applyProposalUpdate, proposalViewFromSnapshot } from "./proposalView.ts";
+import { playVoteChime } from "./voteChime.ts";
 import { YT_PLAYER_STATE, type YoutubePlayerHandle } from "./YoutubePlayer.tsx";
 
 // A local poll against the player's own getCurrentTime(), never a network
@@ -96,6 +97,12 @@ export function usePlaybackSync(
   // frame at the target position — the next PLAYING confirmation parks it
   // right back at that position instead of letting it actually resume.
   const pendingParkRef = useRef(false);
+  // The currently-open proposal's id, tracked outside React state so the
+  // vote chime (see proposal:update below) can tell "a genuinely new vote
+  // just opened" from "the same open vote got another ballot" without
+  // putting that side effect inside a setState updater, which StrictMode
+  // may invoke more than once per real update.
+  const activeProposalIdRef = useRef<string | null>(null);
 
   // While the server gathers end reports, an old PLAYING anchor keeps
   // advancing. Never reload/seek beyond the video's end: YouTube can restart
@@ -212,6 +219,9 @@ export function usePlaybackSync(
 
     socket.on("room:snapshot", (snapshot: RoomSnapshot) => {
       const proposalView = proposalViewFromSnapshot(snapshot.activeProposal);
+      // Seeded silently — a late join or reconnect catching an already-open
+      // vote should never play the "a new vote just started" chime.
+      activeProposalIdRef.current = snapshot.activeProposal?.proposalId ?? null;
       setState((s) => ({
         connected: true,
         joinError: null,
@@ -253,6 +263,12 @@ export function usePlaybackSync(
     // computes itself. A resolved one moves out of activeProposal into
     // lastProposalResult, so the controls come back as soon as a vote closes.
     socket.on("proposal:update", (update: ProposalBroadcast) => {
+      if (update.proposal.state === "OPEN") {
+        if (activeProposalIdRef.current !== update.proposal.proposalId) playVoteChime();
+        activeProposalIdRef.current = update.proposal.proposalId;
+      } else if (activeProposalIdRef.current === update.proposal.proposalId) {
+        activeProposalIdRef.current = null;
+      }
       setState((s) => {
         const view = applyProposalUpdate({ active: s.activeProposal, lastResult: s.lastProposalResult }, update);
         return { ...s, activeProposal: view.active, lastProposalResult: view.lastResult, proposalError: null };
@@ -264,6 +280,10 @@ export function usePlaybackSync(
     });
 
     socket.on("proposal:voteError", ({ error }: { error: string }) => {
+      setState((s) => ({ ...s, proposalError: error }));
+    });
+
+    socket.on("proposal:cancelError", ({ error }: { error: string }) => {
       setState((s) => ({ ...s, proposalError: error }));
     });
 
@@ -386,6 +406,12 @@ export function usePlaybackSync(
 
   const castProposalVote = useCallback((proposalId: string, choice: VoteChoice) => {
     socketRef.current?.emit("proposal:vote", { proposalId, choice });
+  }, []);
+
+  // Only the proposer may do this (server/src/proposals.ts's cancelProposal
+  // rejects anyone else) — the client only ever shows the button to them.
+  const cancelProposalVote = useCallback((proposalId: string) => {
+    socketRef.current?.emit("proposal:cancel", { proposalId });
   }, []);
 
   // Acknowledgement controls draft clearing; failed sends keep the text.
@@ -525,6 +551,7 @@ export function usePlaybackSync(
     requestRemoveQueueItemProposal,
     requestReorderQueueProposal,
     castProposalVote,
+    cancelProposalVote,
     handlePlayerStateChange,
     handlePlayerReady,
     sendChatMessage,

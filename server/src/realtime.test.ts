@@ -559,7 +559,7 @@ describe("realtime PLAY/PAUSE voting", () => {
     expect((await requestError).error).toMatch(/already playing/);
   });
 
-  it("leaves an unresolved proposal to fail on disconnect: the disconnecting voter's silence counts as abstain, not as blocking resolution", async () => {
+  it("a disconnect that leaves the proposer as the sole survivor resolves immediately on their own auto-YES (docs/adr/0010), instead of always failing a fixed minimum", async () => {
     const aliceSocket = await connect(alice, "client-alice");
     aliceSocket.emit("room:join", { roomId });
     await waitFor(aliceSocket, "room:snapshot");
@@ -572,13 +572,55 @@ describe("realtime PLAY/PAUSE voting", () => {
     aliceSocket.emit("proposal:request", { type: "PAUSE" });
     await waitFor(bobSocket, "proposal:update");
 
-    // Bob disconnects mid-vote without ever casting a ballot.
+    // Bob disconnects mid-vote without ever casting a ballot. He was the
+    // only account standing between Alice and quorum, so once presence
+    // actually reflects his absence, Alice's own auto-YES is immediately
+    // sufficient — the vote need not wait out the rest of its window just to
+    // fail on a minimum nobody could ever meet again.
     const finalSeen = waitFor<{ proposal: { state: string } }>(aliceSocket, "proposal:update");
     bobSocket.close();
 
     const final = await finalSeen;
-    expect(final.proposal.state).toBe("FAILED"); // only alice's auto-YES; below minimum 2 non-abstain votes
+    expect(final.proposal.state).toBe("PASSED");
+    expect(getCurrentPlayback(db, roomId)?.status).toBe("PAUSED");
+  });
+
+  it("proposal:cancel is rejected from anyone but the proposer", async () => {
+    const aliceSocket = await connect(alice, "client-alice");
+    aliceSocket.emit("room:join", { roomId });
+    await waitFor(aliceSocket, "room:snapshot");
+
+    const bobSocket = await connect(bob, "client-bob");
+    bobSocket.emit("room:join", { roomId });
+    await waitFor(bobSocket, "room:snapshot");
+
+    aliceSocket.emit("proposal:request", { type: "PAUSE" });
+    const opened = await waitFor<{ proposal: { proposalId: string } }>(bobSocket, "proposal:update");
+
+    const rejected = waitFor<{ error: string }>(bobSocket, "proposal:cancelError");
+    bobSocket.emit("proposal:cancel", { proposalId: opened.proposal.proposalId });
+    expect((await rejected).error).toMatch(/proposer/);
+    expect(proposals.getActiveProposal(roomId)?.state).toBe("OPEN");
+  });
+
+  it("lets the proposer cancel their own open vote, resolving it as cancelled without executing it", async () => {
+    const aliceSocket = await connect(alice, "client-alice");
+    aliceSocket.emit("room:join", { roomId });
+    await waitFor(aliceSocket, "room:snapshot");
+
+    const bobSocket = await connect(bob, "client-bob");
+    bobSocket.emit("room:join", { roomId });
+    await waitFor(bobSocket, "room:snapshot");
+
+    aliceSocket.emit("proposal:request", { type: "PAUSE" });
+    const opened = await waitFor<{ proposal: { proposalId: string } }>(bobSocket, "proposal:update");
+
+    const cancelled = waitFor<{ proposal: { state: string }; applied: boolean; cancelled?: boolean }>(bobSocket, "proposal:update");
+    aliceSocket.emit("proposal:cancel", { proposalId: opened.proposal.proposalId });
+
+    expect(await cancelled).toMatchObject({ proposal: { state: "FAILED" }, applied: false, cancelled: true });
     expect(getCurrentPlayback(db, roomId)?.status).toBe("PLAYING");
+    expect(proposals.getActiveProposal(roomId)).toBeNull();
   });
 });
 

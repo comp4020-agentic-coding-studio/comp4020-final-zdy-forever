@@ -66,9 +66,13 @@ export interface Proposal {
 // `proposal.state` is the engine's honest verdict (OPEN/PASSED/FAILED), while
 // `applied` says whether a PASSED verdict actually got to mutate playback/
 // queue state (it may not, if the reference went stale before it closed).
+// `cancelled` is set only when the proposer withdrew the vote themselves
+// (ProposalManager.cancelProposal) — a FAILED proposal that never ran a
+// losing tally, so the client can say "cancelled" instead of "failed".
 export interface ProposalBroadcast {
   proposal: Proposal;
   applied: boolean;
+  cancelled?: boolean;
 }
 
 export const VOTING_WINDOW_MS = 15_000;
@@ -148,7 +152,16 @@ export interface VoteTally {
 // counted in the first place. floor(validVotes / 2) + 1 is a strict
 // majority of non-abstain votes, so an exact tie (e.g. 2 YES / 2 NO) always
 // fails without needing a separate tie-check.
-export function tallyVotes(votes: Record<string, VoteChoice>): VoteTally {
+//
+// `presentCount`, when given, is how many distinct accounts are live in the
+// room right now (server/src/presence.ts) — the most votes this proposal
+// could ever still receive. MIN_NON_ABSTAIN_VOTES is a ceiling on that, not
+// a fixed floor: once presentCount itself drops below 2 (a second voter was
+// never real, or left mid-vote), requiring 2 valid votes would deadlock the
+// room forever, so the requirement relaxes to whatever is actually still
+// possible (docs/adr/0010). Omitting presentCount keeps the old fixed-2
+// behaviour, for callers (and tests) with no notion of live presence.
+export function tallyVotes(votes: Record<string, VoteChoice>, presentCount?: number): VoteTally {
   let yes = 0;
   let no = 0;
   for (const choice of Object.values(votes)) {
@@ -157,7 +170,8 @@ export function tallyVotes(votes: Record<string, VoteChoice>): VoteTally {
   }
   const validVotes = yes + no;
   const requiredYes = Math.floor(validVotes / 2) + 1;
-  const passed = validVotes >= MIN_NON_ABSTAIN_VOTES && yes >= requiredYes;
+  const requiredMinimum = presentCount === undefined ? MIN_NON_ABSTAIN_VOTES : Math.min(MIN_NON_ABSTAIN_VOTES, presentCount);
+  const passed = validVotes >= requiredMinimum && yes >= requiredYes;
   return { yes, no, validVotes, requiredYes, passed };
 }
 
@@ -166,12 +180,13 @@ export function tallyVotes(votes: Record<string, VoteChoice>): VoteTally {
 // before expiresAt (the deadline path; the server may settle earlier once
 // every present account has voted) and once
 // already resolved (idempotent — safe to call repeatedly, e.g. from a
-// periodic sweep, without double-deciding a proposal).
-export function resolveProposal(proposal: Proposal, nowMs: number): Proposal {
+// periodic sweep, without double-deciding a proposal). See tallyVotes for
+// what `presentCount` does to the minimum-votes requirement.
+export function resolveProposal(proposal: Proposal, nowMs: number, presentCount?: number): Proposal {
   if (proposal.state !== "OPEN") return proposal;
   if (nowMs < proposal.expiresAt) return proposal;
 
-  const tally = tallyVotes(proposal.votes);
+  const tally = tallyVotes(proposal.votes, presentCount);
   return { ...proposal, state: tally.passed ? "PASSED" : "FAILED" };
 }
 

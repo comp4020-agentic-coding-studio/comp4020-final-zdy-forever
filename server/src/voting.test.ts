@@ -204,6 +204,32 @@ describe("tallyVotes", () => {
     expect(tallyVotes({ a: "YES", b: "YES" })).toEqual(tallyVotes({ a: "YES", b: "YES" }));
     expect(tallyVotes({ a: "YES", b: "YES" }).passed).toBe(true);
   });
+
+  describe("presentCount (docs/adr/0010)", () => {
+    it("a lone present account's own YES passes — the minimum-2 floor relaxes to presentCount", () => {
+      const tally = tallyVotes({ "acct-a": "YES" }, 1);
+      expect(tally.validVotes).toBe(1);
+      expect(tally.passed).toBe(true);
+    });
+
+    it("a lone present account's own NO fails, not just 'not yet decided'", () => {
+      expect(tallyVotes({ "acct-a": "NO" }, 1).passed).toBe(false);
+    });
+
+    it("plenty of people present but only one bothered to vote still fails — the floor only relaxes when nobody else COULD vote", () => {
+      expect(tallyVotes({ "acct-a": "YES" }, 10).passed).toBe(false);
+    });
+
+    it("omitting presentCount keeps the fixed minimum-2 behaviour", () => {
+      expect(tallyVotes({ "acct-a": "YES" }).passed).toBe(false);
+    });
+
+    it("presentCount never raises the requirement above the fixed minimum", () => {
+      // 3 present, only 2 of them voted — still just the ordinary 2-vote
+      // minimum, never 3.
+      expect(tallyVotes({ a: "YES", b: "YES" }, 3).passed).toBe(true);
+    });
+  });
 });
 
 describe("resolveProposal", () => {
@@ -256,6 +282,18 @@ describe("resolveProposal", () => {
     const resolvedOnce = resolveProposal(open, open.expiresAt);
     const resolvedTwice = resolveProposal(resolvedOnce, open.expiresAt + 10_000);
     expect(resolvedTwice).toEqual(resolvedOnce);
+  });
+
+  it("with presentCount: a sole surviving voter's own YES passes at the deadline, where the fixed minimum would have failed it", () => {
+    const proposal = playbackProposal();
+    const afterA = castVote(proposal, "acct-a", "YES", CREATED_AT + 1_000);
+    const open = (afterA as { ok: true; proposal: Proposal }).proposal;
+
+    const resolvedFixed = resolveProposal(open, open.expiresAt);
+    expect(resolvedFixed.state).toBe("FAILED");
+
+    const resolvedLive = resolveProposal(open, open.expiresAt, 1);
+    expect(resolvedLive.state).toBe("PASSED");
   });
 });
 

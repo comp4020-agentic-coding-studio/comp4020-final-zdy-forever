@@ -52,7 +52,7 @@ describe("logging", () => {
       expect(event).toEqual({ ...input, timestamp: event.timestamp });
     });
 
-    it("covers exactly the 14 action kinds required by CLAUDE.md's observability request", () => {
+    it("covers exactly the 15 action kinds required by CLAUDE.md's observability request", () => {
       expect([...LOG_ACTIONS].sort()).toEqual(
         [
           "ROOM_CREATE",
@@ -63,6 +63,7 @@ describe("logging", () => {
           "VOTE_CAST",
           "PROPOSAL_PASS",
           "PROPOSAL_FAIL",
+          "PROPOSAL_CANCEL",
           "PLAYBACK_CHANGE",
           "QUEUE_REMOVE",
           "QUEUE_REORDER",

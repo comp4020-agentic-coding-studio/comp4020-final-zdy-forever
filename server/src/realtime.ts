@@ -132,7 +132,14 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
       io.to(roomId).emit("presence:leave", { accountId: result.accountId });
       logAction(db, { action: "ROOM_LEAVE", result: "ok", roomId, accountId: result.accountId });
     }
-    if (reconcile) handoffs.reconcile(roomId);
+    if (reconcile) {
+      handoffs.reconcile(roomId);
+      // A departure can turn "not everyone present has voted yet" into
+      // "yes, now they have" — most notably once a ghost connection presence
+      // hadn't yet pruned finally drops, leaving a genuine sole listener (see
+      // ProposalManager.reconcilePresence, docs/adr/0010).
+      proposals.reconcilePresence(io, db, roomId);
+    }
   }
 
   // A room auto-closes once 2 hours pass with no meaningful activity,
@@ -343,6 +350,30 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
       const result = proposals.castVote(io, db, data.roomId, proposalId, data.accountId, choice as VoteChoice);
       if (!result.ok) {
         socket.emit("proposal:voteError", { error: result.error });
+      }
+    }));
+
+    // Only the proposer may withdraw their own open proposal — anyone else's
+    // request is rejected by ProposalManager.cancelProposal itself, not just
+    // hidden client-side.
+    socket.on("proposal:cancel", guarded("proposal:cancel", reportTo("proposal:cancelError"), (payload: { proposalId?: unknown }) => {
+      if (!data.roomId) {
+        socket.emit("proposal:cancelError", { error: "join a room before cancelling a vote" });
+        return;
+      }
+      if (evictIfClosed(data.roomId)) {
+        socket.emit("proposal:cancelError", { error: ROOM_CLOSED_MESSAGE });
+        return;
+      }
+      const proposalId = typeof payload?.proposalId === "string" ? payload.proposalId : "";
+      const active = proposals.getActiveProposal(data.roomId);
+      if (!proposalId || !active || active.proposalId !== proposalId) {
+        socket.emit("proposal:cancelError", { error: "no matching active proposal in this room" });
+        return;
+      }
+      const result = proposals.cancelProposal(io, db, data.roomId, data.accountId);
+      if (!result.ok) {
+        socket.emit("proposal:cancelError", { error: result.error });
       }
     }));
 

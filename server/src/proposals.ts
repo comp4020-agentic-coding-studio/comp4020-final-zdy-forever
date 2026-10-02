@@ -362,30 +362,94 @@ export class ProposalManager {
 
     // "vote" is meaningful activity (CLAUDE.md's Rooms section) — written
     // before the ballot is recorded, so a failed write never half-counts it.
+    // A second ballot from the same account simply overwrites its first
+    // (engineCastVote's own doc comment) — this is also how a voter changes
+    // their mind from YES to NO (or back) any time before the proposal
+    // resolves, with no extra server-side plumbing needed for that.
     touchRoomActivity(db, roomId, nowMs);
     this.active.set(roomId, result.proposal);
     logAction(db, { action: "VOTE_CAST", result: "ok", roomId, accountId, proposalId, detail: choice }, nowMs);
-    // Count actual account identities from server presence, not a client
-    // count or the number of ballots: departed voters cannot stand in for
-    // people who have not voted. Normal quorum/staleness rules still apply.
-    const present = this.presentAccounts?.(roomId);
-    if (present?.length && present.every((id) => result.proposal.votes[id] === "YES" || result.proposal.votes[id] === "NO")) {
-      const timer = this.timers.get(roomId);
-      if (timer) clearTimeout(timer);
-      this.timers.delete(roomId);
-      this.active.delete(roomId);
-      const resolved: Proposal = { ...result.proposal, state: tallyVotes(result.proposal.votes).passed ? "PASSED" : "FAILED" };
-      if (resolved.state === "PASSED") {
-        this.applyPassed(io, db, roomId, resolved);
-      } else {
-        logAction(db, { action: "PROPOSAL_FAIL", result: "ok", roomId,
-          proposalId, accountId: resolved.proposer, detail: resolved.type });
-        this.broadcast(io, roomId, resolved, false);
-      }
-      return { ok: true, proposal: resolved };
-    }
+    const resolved = this.tryResolveIfEveryoneVoted(io, db, roomId, result.proposal);
+    if (resolved) return { ok: true, proposal: resolved };
     this.broadcast(io, roomId, result.proposal, false);
     return { ok: true, proposal: result.proposal };
+  }
+
+  // Lets the proposer withdraw their own open proposal before it resolves —
+  // nobody else may cancel someone else's vote. Ends it the same way a
+  // natural FAILED verdict would (timer cleared, no execution), but the
+  // broadcast is marked `cancelled` so the client can say "cancelled" rather
+  // than "failed" (a FAILED proposal with cancelled left unset still means an
+  // honest losing tally).
+  cancelProposal(io: Server, db: DatabaseSync, roomId: string, accountId: string): ProposalOutcome {
+    const proposal = this.active.get(roomId);
+    if (!proposal) {
+      return { ok: false, error: "no active proposal in this room" };
+    }
+    if (proposal.proposer !== accountId) {
+      return { ok: false, error: "only the proposer may cancel this vote" };
+    }
+
+    const timer = this.timers.get(roomId);
+    if (timer) clearTimeout(timer);
+    this.timers.delete(roomId);
+    this.active.delete(roomId);
+
+    const nowMs = Date.now();
+    const cancelled: Proposal = { ...proposal, state: "FAILED" };
+    logAction(db, {
+      action: "PROPOSAL_CANCEL", result: "ok", roomId,
+      proposalId: proposal.proposalId, accountId, detail: proposal.type,
+    }, nowMs);
+    this.broadcast(io, roomId, cancelled, false, true);
+    return { ok: true, proposal: cancelled };
+  }
+
+  // Called whenever room presence changes (a disconnect, an explicit leave —
+  // see realtime.ts's leaveCurrentRoom) rather than only when a new ballot is
+  // cast (castVote above). A departure can turn "not everyone present has
+  // voted yet" into "yes, now they have" — most notably when the room
+  // degrades to a single real listener while a ghost connection (not yet
+  // pruned by presence) had been propping the present-count up (docs/adr/0010)
+  // — so this re-runs the exact same early-resolution check from the other
+  // direction. A no-op if no proposal is open, or if whoever is still present
+  // hasn't finished voting.
+  reconcilePresence(io: Server, db: DatabaseSync, roomId: string): void {
+    const proposal = this.active.get(roomId);
+    if (!proposal) return;
+    this.tryResolveIfEveryoneVoted(io, db, roomId, proposal);
+  }
+
+  // Shared by castVote and reconcilePresence: once every currently-present
+  // account has cast a YES/NO ballot, resolve right away instead of waiting
+  // out the rest of the 15-second window (docs/adr/0009). Counts actual
+  // account identities from live server presence, not a client-claimed count
+  // or the number of ballots — departed voters cannot stand in for people who
+  // have not voted. `presentCount` also caps the minimum-votes requirement
+  // itself (shared/src/voting.ts's tallyVotes), so a room that has genuinely
+  // shrunk to one listener can still resolve on that one ballot rather than
+  // deadlock forever on "at least 2 valid votes" (docs/adr/0010). Returns the
+  // resolved proposal if it just settled, else null (still open).
+  private tryResolveIfEveryoneVoted(io: Server, db: DatabaseSync, roomId: string, proposal: Proposal): Proposal | null {
+    const present = this.presentAccounts?.(roomId);
+    if (!present?.length || !present.every((id) => proposal.votes[id] === "YES" || proposal.votes[id] === "NO")) {
+      return null;
+    }
+
+    const timer = this.timers.get(roomId);
+    if (timer) clearTimeout(timer);
+    this.timers.delete(roomId);
+    this.active.delete(roomId);
+
+    const resolved: Proposal = { ...proposal, state: tallyVotes(proposal.votes, present.length).passed ? "PASSED" : "FAILED" };
+    if (resolved.state === "PASSED") {
+      this.applyPassed(io, db, roomId, resolved);
+    } else {
+      logAction(db, { action: "PROPOSAL_FAIL", result: "ok", roomId,
+        proposalId: resolved.proposalId, accountId: resolved.proposer, detail: resolved.type });
+      this.broadcast(io, roomId, resolved, false);
+    }
+    return resolved;
   }
 
   // Exposed only so tests can force resolution deterministically instead of
@@ -520,7 +584,12 @@ export class ProposalManager {
     if (!proposal) return;
     this.active.delete(roomId);
 
-    const resolved = resolveProposal(proposal, Date.now());
+    // presentCount caps the minimum-votes requirement itself (see tallyVotes
+    // in shared/src/voting.ts and docs/adr/0010), so a room that genuinely
+    // shrank to one listener during the vote doesn't deadlock here waiting
+    // forever for a second valid vote nobody is left to cast.
+    const presentCount = this.presentAccounts?.(roomId).length;
+    const resolved = resolveProposal(proposal, Date.now(), presentCount);
 
     if (!canExecute(resolved)) {
       logAction(db, {
@@ -737,8 +806,8 @@ export class ProposalManager {
     return { kind: "playback", playbackId: playback.playbackId, revision: playback.revision };
   }
 
-  private broadcast(io: Server, roomId: string, proposal: Proposal, applied: boolean): void {
-    const payload: ProposalBroadcast = { proposal, applied };
+  private broadcast(io: Server, roomId: string, proposal: Proposal, applied: boolean, cancelled?: boolean): void {
+    const payload: ProposalBroadcast = { proposal, applied, ...(cancelled ? { cancelled: true } : {}) };
     io.to(roomId).emit("proposal:update", payload);
   }
 }

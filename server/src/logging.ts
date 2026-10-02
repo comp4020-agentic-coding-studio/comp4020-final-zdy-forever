@@ -2,7 +2,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { getAccountById } from "./accounts.ts";
 
 // Structured server-side observability (see CLAUDE.md's request: "Add
-// structured server-side observability"). Exactly these 14 action kinds are
+// structured server-side observability"). Exactly these 15 action kinds are
 // ever logged — one per meaningful state change, never a raw request/response
 // dump.
 export const LOG_ACTIONS = [
@@ -14,6 +14,7 @@ export const LOG_ACTIONS = [
   "VOTE_CAST",
   "PROPOSAL_PASS",
   "PROPOSAL_FAIL",
+  "PROPOSAL_CANCEL",
   "PLAYBACK_CHANGE",
   "QUEUE_REMOVE",
   "QUEUE_REORDER",
@@ -80,7 +81,12 @@ function pruneOldLogs(db: DatabaseSync, nowMs: number): void {
 export function logAction(db: DatabaseSync, input: LogEventInput, nowMs: number = Date.now()): void {
   const event = formatLogEvent(input, nowMs);
 
+  // One commit instead of two (the insert, and pruneOldLogs' delete) — this
+  // runs on every single meaningful action in the app (every vote, chat
+  // message, join, playback change, ...), so it's the hottest write path by
+  // far; halving its commits matters more here than almost anywhere else.
   try {
+    db.exec("BEGIN");
     db.prepare(`INSERT INTO logs (${LOG_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       event.timestamp,
       event.action,
@@ -93,7 +99,16 @@ export function logAction(db: DatabaseSync, input: LogEventInput, nowMs: number 
       event.detail ?? null,
     );
     pruneOldLogs(db, nowMs);
+    db.exec("COMMIT");
   } catch (err) {
+    // ROLLBACK can itself throw (e.g. the database closed out from under
+    // this call, so there was never a transaction to roll back) — logAction
+    // must never throw regardless, so that failure is swallowed too.
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // nothing more to do
+    }
     console.error(`failed to persist log event ${event.action}:`, err);
   }
 

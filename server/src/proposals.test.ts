@@ -159,6 +159,105 @@ describe("ProposalManager", () => {
     } finally { manager.dispose(); }
   });
 
+  describe("cancelProposal", () => {
+    it("rejects a cancellation from anyone but the proposer, leaving the vote open", () => {
+      const manager = new ProposalManager(() => [alice.accountId, bob.accountId]);
+      const { io } = fakeIo();
+      try {
+        const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "PAUSE");
+        if (!requested.ok) throw new Error(requested.error);
+        const result = manager.cancelProposal(io, db, roomId, bob.accountId);
+        expect(result.ok).toBe(false);
+        expect(manager.getActiveProposal(roomId)?.state).toBe("OPEN");
+      } finally { manager.dispose(); }
+    });
+
+    it("lets the proposer withdraw their own open vote, ending it without executing", () => {
+      vi.useFakeTimers();
+      const manager = new ProposalManager(() => [alice.accountId, bob.accountId]);
+      const { io, emitted } = fakeIo();
+      try {
+        const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "PAUSE");
+        if (!requested.ok) throw new Error(requested.error);
+        const result = manager.cancelProposal(io, db, roomId, alice.accountId);
+        expect(result.ok && result.proposal.state).toBe("FAILED");
+        expect(manager.getActiveProposal(roomId)).toBeNull();
+        // Never executed: playback is still PLAYING, not PAUSED.
+        expect(getCurrentPlayback(db, roomId)?.status).toBe("PLAYING");
+        expect(emitted.at(-1)?.payload).toMatchObject({ proposal: { state: "FAILED" }, applied: false, cancelled: true });
+
+        const count = emitted.length;
+        vi.advanceTimersByTime(15_000);
+        expect(emitted).toHaveLength(count); // the 15s timer was cancelled, not merely outrun
+
+        // The withdrawn proposal's id can no longer receive ballots.
+        expect(manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "YES").ok).toBe(false);
+      } finally { manager.dispose(); vi.useRealTimers(); }
+    });
+
+    it("reports no active proposal to cancel when none is open", () => {
+      const manager = new ProposalManager(() => [alice.accountId]);
+      const { io } = fakeIo();
+      try {
+        expect(manager.cancelProposal(io, db, roomId, alice.accountId).ok).toBe(false);
+      } finally { manager.dispose(); }
+    });
+  });
+
+  describe("reconcilePresence (docs/adr/0010: quorum tracks live presence)", () => {
+    it("resolves immediately once a departure leaves the proposer as the sole survivor, passing on their own auto-YES", () => {
+      vi.useFakeTimers();
+      let present = [alice.accountId, bob.accountId];
+      const manager = new ProposalManager(() => present);
+      const { io, emitted } = fakeIo();
+      try {
+        const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "PAUSE", { presentCount: 2 });
+        if (!requested.ok) throw new Error(requested.error);
+        expect(manager.getActiveProposal(roomId)?.state).toBe("OPEN");
+
+        // Bob's connection silently died; presence has now pruned him
+        // without anyone casting another ballot.
+        present = [alice.accountId];
+        manager.reconcilePresence(io, db, roomId);
+
+        expect(manager.getActiveProposal(roomId)).toBeNull();
+        expect(getCurrentPlayback(db, roomId)?.status).toBe("PAUSED");
+        expect(emitted.filter((e) => e.event === "proposal:update").at(-1)?.payload).toMatchObject({
+          proposal: { state: "PASSED" },
+        });
+
+        const count = emitted.length;
+        vi.advanceTimersByTime(15_000);
+        expect(emitted).toHaveLength(count);
+      } finally { manager.dispose(); vi.useRealTimers(); }
+    });
+
+    it("does nothing while a still-present member hasn't voted yet", () => {
+      let present = [alice.accountId, bob.accountId, carol.accountId];
+      const manager = new ProposalManager(() => present);
+      const { io } = fakeIo();
+      try {
+        const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "PAUSE", { presentCount: 3 });
+        if (!requested.ok) throw new Error(requested.error);
+
+        // Carol left, but Bob (still present) hasn't voted — nothing to
+        // resolve yet.
+        present = [alice.accountId, bob.accountId];
+        manager.reconcilePresence(io, db, roomId);
+        expect(manager.getActiveProposal(roomId)?.state).toBe("OPEN");
+      } finally { manager.dispose(); }
+    });
+
+    it("is a no-op when no proposal is open", () => {
+      const manager = new ProposalManager(() => [alice.accountId]);
+      const { io, emitted } = fakeIo();
+      try {
+        manager.reconcilePresence(io, db, roomId);
+        expect(emitted).toHaveLength(0);
+      } finally { manager.dispose(); }
+    });
+  });
+
   it("replays an exhausted queue from the chosen item at zero, then follows the existing order", async () => {
     const manager = new ProposalManager();
     const { io, emitted } = fakeIo();
