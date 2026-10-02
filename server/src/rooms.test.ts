@@ -9,7 +9,9 @@ import {
   AUTO_CLOSE_INACTIVITY_MS,
   createRoom,
   generateActiveRoomCode,
+  generateActiveRoomNumber,
   getActiveRoomByCode,
+  getActiveRoomByNumber,
   getRoomById,
   isAutoCloseDue,
   isRoomMember,
@@ -53,6 +55,8 @@ describe("rooms", () => {
 
     expect(room.roomId).toBeTruthy();
     expect(room.code).toBeNull();
+    // PUBLIC rooms get the 7-digit quick-join number instead of a code.
+    expect(room.roomNumber).toMatch(/^\d{7}$/);
     expect(room.visibility).toBe("PUBLIC");
     expect(room.creatorAccountId).toBe(creatorAccountId);
     expect(room.maxUsers).toBe(MAX_ROOM_USERS);
@@ -60,7 +64,7 @@ describe("rooms", () => {
     expect(room.lastMeaningfulActivityAt).toBe(room.createdAt);
   });
 
-  it("creates a private room with a 6-digit numeric code", () => {
+  it("creates a private room with a 6-digit numeric code, and no room number", () => {
     const room = createRoom(db, {
       accountId: creatorAccountId,
       name: "Secret room",
@@ -69,6 +73,7 @@ describe("rooms", () => {
     });
 
     expect(room.code).toMatch(/^\d{6}$/);
+    expect(room.roomNumber).toBeNull();
     expect(room.autoCloseEnabled).toBe(true);
   });
 
@@ -135,6 +140,33 @@ describe("rooms", () => {
     db.prepare("UPDATE rooms SET code = ? WHERE roomId = ?").run(closedOne.code, reused.roomId);
 
     expect(getRoomById(db, reused.roomId)?.code).toBe(closedOne.code);
+  });
+
+  it("retries room-number generation past a collision with another active room's number", () => {
+    const taken = createRoom(db, {
+      accountId: creatorAccountId,
+      name: "Taken",
+      visibility: "PUBLIC",
+      autoCloseEnabled: false,
+    }).roomNumber as string;
+
+    const numbers = [taken, "7654321"];
+    const roomNumber = generateActiveRoomNumber(db, () => numbers.shift() as string);
+
+    expect(roomNumber).toBe("7654321");
+  });
+
+  it("allows a closed room's number to be reused by a new active room", () => {
+    const closedOne = createRoom(db, {
+      accountId: creatorAccountId,
+      name: "Old room",
+      visibility: "PUBLIC",
+      autoCloseEnabled: false,
+    });
+    db.prepare("UPDATE rooms SET closed = 1 WHERE roomId = ?").run(closedOne.roomId);
+
+    const roomNumber = generateActiveRoomNumber(db, () => closedOne.roomNumber as string);
+    expect(roomNumber).toBe(closedOne.roomNumber);
   });
 
   it("persists rooms across a database reopen", () => {
@@ -249,6 +281,22 @@ describe("rooms", () => {
     expect(getActiveRoomByCode(db, "000000")).toBeUndefined();
   });
 
+  it("finds an active public room by its room number", () => {
+    const room = createRoom(db, {
+      accountId: creatorAccountId,
+      name: "Open room",
+      visibility: "PUBLIC",
+      autoCloseEnabled: false,
+    });
+
+    const found = getActiveRoomByNumber(db, room.roomNumber as string);
+    expect(found?.roomId).toBe(room.roomId);
+  });
+
+  it("returns undefined for a room number that does not belong to any active room", () => {
+    expect(getActiveRoomByNumber(db, "0000000")).toBeUndefined();
+  });
+
   it("lists only PUBLIC, non-closed rooms in the lobby with occupancy/capacity/joinable", () => {
     const publicRoom = createRoom(db, {
       accountId: creatorAccountId,
@@ -276,6 +324,7 @@ describe("rooms", () => {
     expect(lobby[0]).toEqual({
       roomId: publicRoom.roomId,
       name: "Open room",
+      roomNumber: publicRoom.roomNumber,
       occupancy: 1,
       capacity: MAX_ROOM_USERS,
       joinable: true,

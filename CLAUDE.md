@@ -66,12 +66,16 @@ Never use displayName or socketId as permanent identity.
 
 Rooms may be:
 
-- Public: visible in lobby
+- Public: visible in lobby, and also reachable directly by a 7-digit room number (so a crowded lobby never needs to be scrolled)
 - Private: hidden and joined with a 6-digit code
+
+Room names are at most 20 characters.
 
 Maximum 12 users.
 
-Private codes must be checked for active collisions.
+Private codes, and public room numbers, must each be checked for active collisions. A room's code/number is exclusive only while it's open; a closed room's frees up for reuse. The "join a room" input is a single field: 6 digits means a private code, 7 digits means a public room number — the two lengths are deliberately different so one input can always tell which is meant.
+
+Sharing a room (a copyable link, or the native share sheet) only ever pre-fills that join input for whoever opens it. It never joins on its own, for a public room exactly as much as a private one — joining still always takes an explicit click, which is the one verification step a private room's code must never be allowed to skip.
 
 Every room automatically closes after 2 hours of inactivity. This is mandatory,
 including legacy rooms; there is no creation-form toggle or client opt-out.
@@ -171,13 +175,13 @@ Voting rules:
 - YES / NO
 - no response = ABSTAIN
 - ABSTAIN excluded from denominator
-- minimum 2 non-abstain votes
+- minimum 2 non-abstain votes, capped at how many accounts are actually present right now (never more votes required than could possibly be cast) — see `docs/adr/0010-live-presence-quorum.md`
 - required YES = floor(validVotes / 2) + 1
 - tie fails
 
-Exception: when the proposer is the only person in the room, there is nobody to vote with, so their proposal passes immediately (all other rules, e.g. DJ-only Seek, still apply). See `docs/adr/0004-sole-listener-proposals-pass.md`.
+Exception: when the proposer is the only person in the room, there is nobody to vote with, so their proposal passes immediately (all other rules, e.g. DJ-only Seek, still apply). See `docs/adr/0004-sole-listener-proposals-pass.md`. The same quorum-tracks-presence logic also resolves a vote early if the room degrades to one listener while it's still open, not only at request time.
 
-One account gets one vote.
+One account gets one vote, and may change it between YES and NO any number of times before the proposal resolves. The proposer may also cancel their own open proposal before it resolves; nobody else may cancel it for them.
 
 Proposals must reference relevant `playbackId` or queue revision so stale proposals cannot affect later state.
 

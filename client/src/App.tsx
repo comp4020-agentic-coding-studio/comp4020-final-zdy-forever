@@ -13,6 +13,7 @@ import { SeekControl } from "./SeekControl.tsx";
 import { DjHandoffDialog } from "./DjHandoffDialog.tsx";
 import { getClientId } from "./clientId.ts";
 import { loadRoomId, saveRoomId } from "./roomSession.ts";
+import { shareRoom } from "./share.ts";
 import { usePlaybackSync } from "./usePlaybackSync.ts";
 import { YoutubePlayer, type YoutubePlayerHandle } from "./YoutubePlayer.tsx";
 
@@ -61,6 +62,12 @@ function App() {
   // Portal target for the quality/subtitles toggle, so it renders in the
   // "Now playing" header (top-right) rather than YoutubePlayer's own layout.
   const [settingsSlot, setSettingsSlot] = useState<HTMLDivElement | null>(null);
+  // Feedback for the Share button — only ever needs showing for "copied"
+  // (the clipboard fallback has no system UI of its own to confirm it).
+  // "shared" (native share sheet) and "failed" (which also covers the user
+  // simply dismissing that sheet) get no toast: there's nothing useful to
+  // say that isn't either redundant or potentially wrong.
+  const [shareCopied, setShareCopied] = useState(false);
 
   // Local drag UI state only — never authoritative. The actual reorder is
   // requested as a REORDER_QUEUE proposal and only ever takes effect via the
@@ -194,6 +201,21 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // A shared link (see share.ts) only ever pre-fills the join input — it
+  // never joins by itself, for a PRIVATE room exactly as much as a PUBLIC
+  // one, so opening one always still requires an explicit Join click (that's
+  // the one verification step a private room's code must never be allowed to
+  // skip). The query string is stripped right away so neither a refresh nor
+  // copying the URL bar again carries a stale code/number forward.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const join = params.get("join");
+    if (join && /^\d{6}$|^\d{7}$/.test(join)) {
+      setCodeInput(join);
+      window.history.replaceState(null, "", window.location.pathname);
+    }
+  }, []);
+
   // Not being in the room any more — the socket join refused (room full,
   // closed, gone) or the room closed under us — means back to the lobby,
   // with the reason, rather than a room view that can't do anything.
@@ -240,6 +262,15 @@ function App() {
     }
     setCodeInput("");
     enterRoom(result.data.room.roomId);
+  };
+
+  const handleShare = async () => {
+    if (!live.room) return;
+    const outcome = await shareRoom(live.room);
+    if (outcome === "copied") {
+      setShareCopied(true);
+      setTimeout(() => setShareCopied(false), 2000);
+    }
   };
 
   // `input` is a pasted link (or a bare videoId) — the
@@ -290,6 +321,16 @@ function App() {
         onReady={live.handlePlayerReady}
         onSettingsClosed={live.handlePlayerReady}
         settingsSlot={settingsSlot}
+        topRightOverlay={
+          live.room && (
+            <>
+              <button type="button" className="btn btn--sm btn--purple" onClick={() => void handleShare()}>
+                🔗 Share
+              </button>
+              {shareCopied && <span className="sticker sticker--live">copied!</span>}
+            </>
+          )
+        }
       />
       {live.playback && (
         <p>
@@ -376,7 +417,7 @@ function App() {
             onChange={(e) => setNewRoomName(e.target.value)}
             placeholder="room name"
             aria-label="room name"
-            maxLength={60}
+            maxLength={20}
             required
           />
           <fieldset className="choice-row">
@@ -402,15 +443,15 @@ function App() {
           <input
             value={codeInput}
             onChange={(e) => setCodeInput(e.target.value.replace(/\D/g, ""))}
-            placeholder="6-digit code"
-            aria-label="private room code"
+            placeholder="6-digit code or 7-digit room number"
+            aria-label="room code or number"
             inputMode="numeric"
-            pattern="\d{6}"
-            maxLength={6}
+            pattern="\d{6}|\d{7}"
+            maxLength={7}
             required
           />
           <button type="submit" className="btn btn--purple" disabled={!accountId}>
-            🔑 Join with code
+            🔑 Join
           </button>
         </form>
         <div className="lobby-heading">
@@ -426,6 +467,11 @@ function App() {
             {lobby.map((room) => (
               <li key={room.roomId} className="queue-item queue-item--static">
                 <span className="queue-item-title">{room.name}</span>
+                {room.roomNumber && (
+                  <span className="chip" aria-label={`room number ${room.roomNumber}`}>
+                    🔢 {room.roomNumber}
+                  </span>
+                )}
                 <span className="chip">
                   👥 {room.occupancy}/{room.capacity}
                 </span>
@@ -489,6 +535,11 @@ function App() {
             🔒 {live.room.code}
           </span>
         )}
+        {live.room?.visibility === "PUBLIC" && live.room.roomNumber && (
+          <span className="sticker sticker--code" aria-label={`public room number ${live.room.roomNumber}`}>
+            🔢 {live.room.roomNumber}
+          </span>
+        )}
         {live.room && (
           <RoomMembersPopover key={liveRoomId} members={live.presence}
             capacity={live.room.maxUsers} dj={live.playback?.dj ?? null} />
@@ -520,22 +571,33 @@ function App() {
                   ❌ NO {Object.values(proposal.votes).filter((v) => v === "NO").length}
                 </span>
               </div>
-              {accountId && !(accountId in proposal.votes) && (
+              {accountId && (
                 <div className="btn-row">
                   <button
                     type="button"
-                    className="btn btn--green"
+                    className={`btn btn--green${proposal.votes[accountId] === "YES" ? " btn--selected" : ""}`}
+                    aria-pressed={proposal.votes[accountId] === "YES"}
                     onClick={() => live.castProposalVote(proposal.proposalId, "YES")}
                   >
                     👍 Vote YES
                   </button>
                   <button
                     type="button"
-                    className="btn btn--red"
+                    className={`btn btn--red${proposal.votes[accountId] === "NO" ? " btn--selected" : ""}`}
+                    aria-pressed={proposal.votes[accountId] === "NO"}
                     onClick={() => live.castProposalVote(proposal.proposalId, "NO")}
                   >
                     👎 Vote NO
                   </button>
+                  {accountId === proposal.proposer && (
+                    <button
+                      type="button"
+                      className="btn btn--sm"
+                      onClick={() => live.cancelProposalVote(proposal.proposalId)}
+                    >
+                      🛑 Cancel vote
+                    </button>
+                  )}
                 </div>
               )}
             </>
@@ -572,11 +634,13 @@ function App() {
       {!live.activeProposal && live.lastProposalResult && (
         <p className="sticker">
           last vote: {live.lastProposalResult.proposal.type} ·{" "}
-          {live.lastProposalResult.proposal.state === "FAILED"
-            ? "failed"
-            : live.lastProposalResult.applied
-              ? "passed"
-              : "passed, but the room had already moved on"}
+          {live.lastProposalResult.cancelled
+            ? "cancelled by the proposer"
+            : live.lastProposalResult.proposal.state === "FAILED"
+              ? "failed"
+              : live.lastProposalResult.applied
+                ? "passed"
+                : "passed, but the room had already moved on"}
         </p>
       )}
       {live.proposalError && <p role="alert">{live.proposalError}</p>}

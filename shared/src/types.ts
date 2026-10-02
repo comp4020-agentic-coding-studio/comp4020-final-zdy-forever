@@ -27,9 +27,13 @@ export interface RegisterRequest {
 
 export type RoomVisibility = "PUBLIC" | "PRIVATE";
 
-// code is only set for PRIVATE rooms, and is only ever returned to the
-// creator here — there's no room listing yet, and when one exists it must
+// code is only set for PRIVATE rooms (6 digits), and is only ever returned to
+// the creator here — there's no room listing yet, and when one exists it must
 // never include a PRIVATE room or its code to anyone but its members.
+// roomNumber is the PUBLIC-room counterpart (7 digits, always one digit
+// longer so a single "join by code or number" input can tell them apart
+// purely by length — see server/src/index.ts's join-by-code handler): a
+// quick-join shortcut so a crowded lobby never needs to be scrolled.
 // maxUsers is fixed by course spec (not creator-configurable).
 export interface Room {
   roomId: string;
@@ -37,6 +41,7 @@ export interface Room {
   creatorAccountId: string;
   visibility: RoomVisibility;
   code: string | null;
+  roomNumber: string | null;
   maxUsers: number;
   autoCloseEnabled: boolean;
   createdAt: string;
@@ -53,10 +58,12 @@ export interface CreateRoomRequest {
 }
 
 // The public lobby only ever lists PUBLIC, open rooms — never a PRIVATE
-// room, and never its code.
+// room, and never its code. roomNumber is public knowledge for a PUBLIC room
+// (it's listed right here), unlike a PRIVATE room's code.
 export interface LobbyRoom {
   roomId: string;
   name: string;
+  roomNumber: string | null;
   occupancy: number;
   capacity: number;
   joinable: boolean;

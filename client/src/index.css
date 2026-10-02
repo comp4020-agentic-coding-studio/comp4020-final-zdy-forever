@@ -271,6 +271,15 @@ button {
   color: #fff;
 }
 
+/* The vote choice you currently have cast — still clickable (you can change
+   your mind right up until the vote resolves), just visibly "pressed in". */
+.btn--selected {
+  transform: translateY(4px);
+  box-shadow: none;
+  outline: 3px solid var(--ink);
+  outline-offset: 2px;
+}
+
 .btn-row {
   display: flex;
   flex-wrap: wrap;
@@ -720,6 +729,18 @@ form {
   top: 0.75rem;
   display: flex;
   gap: 0.5rem;
+}
+
+/* Mirrors .player-fallback-row on the opposite corner — kept clear of
+   YouTube's own bottom control bar for the same reason. */
+.player-top-right-row {
+  position: absolute;
+  right: 0.75rem;
+  top: 0.75rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  z-index: 1;
 }
 
 /* ================================================================ chat */

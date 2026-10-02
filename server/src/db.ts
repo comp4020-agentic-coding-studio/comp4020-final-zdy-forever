@@ -14,6 +14,25 @@ export function openDatabase(dbPath: string): DatabaseSync {
   const db = new DatabaseSync(dbPath);
   db.exec("PRAGMA foreign_keys = ON");
 
+  // This process is both the only writer and the thing relaying real-time
+  // playback sync — node:sqlite's calls are synchronous, so every write
+  // blocks the single event loop that also has to promptly relay every other
+  // room's proposal/playback/presence events. Under SQLite's default rollback
+  // journal, each commit takes an exclusive lock on the *whole* database file
+  // and fsyncs to disk, so one room's vote/chat/join can stall delivery for
+  // every other room on the same process — more concurrent activity (more
+  // people, across one room or many) means more frequent, longer stalls,
+  // which is what actually shows up as video stutter (CLAUDE.md's Reliability
+  // section: "assume users act concurrently"). WAL mode turns a commit into a
+  // sequential append instead, and NORMAL durability (still fully safe: WAL
+  // never corrupts on a crash, it can just lose the last unforced commit) is
+  // SQLite's own documented pairing for this — this combination is the
+  // standard fix for "many small writers on one connection," not something
+  // specific to this app. A no-op for an in-memory database (`:memory:`),
+  // which SQLite never puts in WAL mode regardless of this pragma.
+  db.exec("PRAGMA journal_mode = WAL");
+  db.exec("PRAGMA synchronous = NORMAL");
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS accounts (
       accountId  TEXT PRIMARY KEY,
@@ -38,6 +57,7 @@ export function openDatabase(dbPath: string): DatabaseSync {
       creatorAccountId TEXT NOT NULL REFERENCES accounts(accountId),
       visibility   TEXT NOT NULL CHECK (visibility IN ('PUBLIC', 'PRIVATE')),
       code         TEXT,
+      roomNumber   TEXT,
       maxUsers     INTEGER NOT NULL,
       autoCloseEnabled INTEGER NOT NULL,
       createdAt    TEXT NOT NULL,
@@ -53,14 +73,27 @@ export function openDatabase(dbPath: string): DatabaseSync {
   if (!existingRoomColumns.has("queueRevision")) {
     db.exec("ALTER TABLE rooms ADD COLUMN queueRevision INTEGER NOT NULL DEFAULT 1");
   }
+  if (!existingRoomColumns.has("roomNumber")) {
+    db.exec("ALTER TABLE rooms ADD COLUMN roomNumber TEXT");
+  }
   db.exec("UPDATE rooms SET autoCloseEnabled = 1 WHERE autoCloseEnabled = 0");
 
-  // A code is exclusive only while its room is active (closed = 0), so a
-  // closed room's code is free for a new room to reuse.
+  // A code (PRIVATE rooms, 6 digits) or roomNumber (PUBLIC rooms, 7 digits —
+  // a quick-join shortcut so a crowded lobby never needs to be scrolled) is
+  // exclusive only while its room is active (closed = 0), so a closed room's
+  // code/number is free for a new room to reuse. Distinct digit counts mean
+  // the two can never collide with each other, so one input field can always
+  // tell which table to look in just from what was typed (server/src/index.ts's
+  // join-by-code handler).
   db.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS rooms_active_code
       ON rooms(code)
       WHERE closed = 0 AND code IS NOT NULL
+  `);
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS rooms_active_number
+      ON rooms(roomNumber)
+      WHERE closed = 0 AND roomNumber IS NOT NULL
   `);
 
   db.exec(`

@@ -33,6 +33,7 @@ import { attachRealtime } from "./realtime.ts";
 import {
   createRoom,
   getActiveRoomByCode,
+  getActiveRoomByNumber,
   getRoomById,
   joinRoom,
   listPublicLobby,
@@ -73,8 +74,18 @@ setInterval(recordAlive, SERVER_ALIVE_INTERVAL_MS).unref();
 const app = express();
 app.use(express.json());
 
+// Socket.IO's defaults (pingInterval 25s, pingTimeout 20s) can take up to 45s
+// to notice a silently-dead connection — long enough that a "ghost" account
+// (gone, but still counted present) can outlive an entire 15-second vote,
+// breaking both the sole-listener fast path and quorum (docs/adr/0010).
+// Tightened so the worst case (~10s) lands well inside that window; a dozen
+// extra heartbeats per room is negligible, and heartbeat traffic was never
+// counted as room activity anyway (CLAUDE.md's Rooms section).
+const PRESENCE_PING_INTERVAL_MS = 5_000;
+const PRESENCE_PING_TIMEOUT_MS = 5_000;
+
 const httpServer = createServer(app);
-const io = new Server(httpServer);
+const io = new Server(httpServer, { pingInterval: PRESENCE_PING_INTERVAL_MS, pingTimeout: PRESENCE_PING_TIMEOUT_MS });
 const { presence, evictIfClosed } = attachRealtime(io, db);
 
 app.get("/api/health", (_req, res) => {
@@ -114,7 +125,7 @@ function authenticateQuery(req: express.Request, res: express.Response): string 
 // Display text is bounded so one client can't store (and have broadcast to a
 // whole room) an arbitrarily large name; counted in characters, not bytes.
 const MAX_DISPLAY_NAME_LENGTH = 32;
-const MAX_ROOM_NAME_LENGTH = 60;
+const MAX_ROOM_NAME_LENGTH = 20;
 const tooLong = (text: string, max: number) => [...text].length > max;
 
 // Lightweight registration: a browser sends the clientId it persists locally
@@ -242,20 +253,30 @@ app.post("/api/rooms/:roomId/join", (req, res) => {
   admit(res, room, accountId);
 });
 
-// Joins a PRIVATE (or PUBLIC) room by its 6-digit code — the only way to
-// reach a PRIVATE room, since it never appears in the lobby.
+// Joins a room by typing its code or number — one input, disambiguated
+// purely by length: 6 digits is a PRIVATE room's code (the only way to reach
+// one, since it never appears in the lobby), 7 digits is a PUBLIC room's
+// quick-join number (see shared/src/types.ts's Room doc comment). Both paths
+// land on the same admit() as every other join route.
 app.post("/api/rooms/join-by-code", (req, res) => {
   const accountId = authenticate(req, res);
   if (!accountId) return;
   const body = req.body as { code?: unknown };
-  const code = typeof body.code === "string" ? body.code.trim() : "";
+  const token = typeof body.code === "string" ? body.code.trim() : "";
 
-  if (!/^\d{6}$/.test(code)) {
-    res.status(400).json({ error: "a 6-digit code is required" });
+  let room: Room | undefined;
+  if (/^\d{6}$/.test(token)) {
+    room = getActiveRoomByCode(db, token);
+  } else if (/^\d{7}$/.test(token)) {
+    room = getActiveRoomByNumber(db, token);
+    // Structurally impossible (only PUBLIC rooms ever get a roomNumber — see
+    // createRoom), checked anyway per this codebase's defense-in-depth style.
+    if (room && room.visibility !== "PUBLIC") room = undefined;
+  } else {
+    res.status(400).json({ error: "enter a 6-digit private code or a 7-digit public room number" });
     return;
   }
 
-  const room = getActiveRoomByCode(db, code);
   if (!room) {
     res.status(404).json({ error: "invalid code" });
     return;

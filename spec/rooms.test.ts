@@ -31,10 +31,10 @@ async function register(displayName: string): Promise<{ accountId: string; clien
 async function createRoom(
   who: { accountId: string; clientId: string },
   visibility: "PUBLIC" | "PRIVATE",
-): Promise<{ roomId: string; code: string | null }> {
+): Promise<{ roomId: string; code: string | null; roomNumber: string | null }> {
   const { status, body } = await post("/api/rooms", { ...who, name: `spec ${visibility}`, visibility, autoCloseEnabled: true });
   expect(status).toBe(201);
-  return { roomId: body.roomId as string, code: body.code as string | null };
+  return { roomId: body.roomId as string, code: body.code as string | null, roomNumber: body.roomNumber as string | null };
 }
 
 // Regression: these endpoints used to trust a bare accountId, which is public
@@ -182,11 +182,31 @@ describe("rooms", () => {
     expect((await post(`/api/rooms/${room.roomId}/join`, bob)).status).toBe(404);
   });
 
+  it("admits someone to a public room with its 7-digit room number, and 404s on an unknown one", async () => {
+    const alice = await register("Alice");
+    const bob = await register("Bob");
+    const room = await createRoom(alice, "PUBLIC");
+    expect(room.roomNumber).toMatch(/^\d{7}$/);
+
+    const joined = await post("/api/rooms/join-by-code", { ...bob, code: room.roomNumber });
+    expect(joined.status).toBe(200);
+    expect((joined.body.room as { roomId: string }).roomId).toBe(room.roomId);
+
+    const unknown = await post("/api/rooms/join-by-code", { ...bob, code: "0000000" });
+    if (unknown.status === 200) expect((unknown.body.room as { roomId: string }).roomId).not.toBe(room.roomId);
+    else expect(unknown.status).toBe(404);
+  });
+
+  it("rejects a code that is neither a 6-digit private code nor a 7-digit public number", async () => {
+    const bob = await register("Bob");
+    expect((await post("/api/rooms/join-by-code", { ...bob, code: "12345" })).status).toBe(400);
+  });
+
   it("rejects over-long display and room names", async () => {
     expect((await post("/api/register", { clientId: randomUUID(), displayName: "x".repeat(33) })).status).toBe(400);
 
     const alice = await register("Alice");
-    const tooLong = await post("/api/rooms", { ...alice, name: "x".repeat(61), visibility: "PUBLIC" });
+    const tooLong = await post("/api/rooms", { ...alice, name: "x".repeat(21), visibility: "PUBLIC" });
     expect(tooLong.status).toBe(400);
   });
 });

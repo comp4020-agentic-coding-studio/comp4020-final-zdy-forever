@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useId, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
+import { forwardRef, useEffect, useId, useImperativeHandle, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 // Minimal ambient shape of the bits of the official YouTube IFrame Player
@@ -136,6 +136,10 @@ export interface YoutubePlayerProps {
   // the viewport when not given, so standalone usage (and this component's
   // own tests) keep working without one.
   settingsSlot?: HTMLElement | null;
+  // Rendered top-right, inside the black video frame itself (unlike
+  // settingsSlot above, this never needs to escape to a different part of
+  // the page, so it's a plain node rather than a portal target).
+  topRightOverlay?: ReactNode;
 }
 
 // Always rendered, with or without a videoId — CLAUDE.md requires the
@@ -160,10 +164,15 @@ function setPlayerInteraction(container: HTMLDivElement | null, enabled: boolean
 }
 
 export const YoutubePlayer = forwardRef<YoutubePlayerHandle, YoutubePlayerProps>(function YoutubePlayer(
-  { videoId, onStateChange, onReady, onSettingsClosed, settingsSlot },
+  { videoId, onStateChange, onReady, onSettingsClosed, settingsSlot, topRightOverlay },
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
+  // The outer black frame (never inert, unlike containerRef above) — what
+  // actually goes fullscreen, so the toggle button itself (and Share, when
+  // present) stays reachable while fullscreen rather than disappearing along
+  // with an inert inner screen.
+  const playerBoxRef = useRef<HTMLDivElement>(null);
   const screenId = useId();
   const [isReady, setIsReady] = useState(false);
   const [settingsVideoId, setSettingsVideoId] = useState<string | null>(null);
@@ -365,6 +374,30 @@ export const YoutubePlayer = forwardRef<YoutubePlayerHandle, YoutubePlayerProps>
     [],
   );
 
+  // Fullscreens the black frame itself, not the iframe YouTube owns — the
+  // frame stays as locked/inert as it already was (see setPlayerInteraction),
+  // so going fullscreen can never become a side door around "lock direct
+  // YouTube input by default" (CLAUDE.md's Authority section). Known gap:
+  // iOS Safari only supports the Fullscreen API on a native <video> element,
+  // not an arbitrary div, so this silently does nothing there — there is no
+  // official workaround for an embedded IFrame player.
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  useEffect(() => {
+    const onChange = () => setIsFullscreen(document.fullscreenElement === playerBoxRef.current);
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, []);
+  const toggleFullscreen = () => {
+    if (document.fullscreenElement) {
+      void document.exitFullscreen();
+    } else {
+      void playerBoxRef.current?.requestFullscreen?.().catch(() => {
+        // Not supported here (iOS Safari, or a browser blocking it outright)
+        // — nothing else to fall back to, so just stay as we were.
+      });
+    }
+  };
+
   const settingsButton = (
     <button
       type="button"
@@ -394,7 +427,7 @@ export const YoutubePlayer = forwardRef<YoutubePlayerHandle, YoutubePlayerProps>
       {settingsSlot ? createPortal(settingsButton, settingsSlot) : <div className="player-settings-row">{settingsButton}</div>}
       {settingsOpen && <p className="player-settings-help">Choose Done to return to room playback.</p>}
       <div className="youtube-player-viewport">
-      <div className="youtube-player">
+      <div className="youtube-player" ref={playerBoxRef}>
         {/* Direct input is allowed only while local viewing settings are open. */}
         <div
           ref={containerRef}
@@ -404,6 +437,18 @@ export const YoutubePlayer = forwardRef<YoutubePlayerHandle, YoutubePlayerProps>
         />
         {!videoId && <p>No track is playing.</p>}
         {error && <p role="alert">{error}</p>}
+        <div className="player-top-right-row">
+          <button
+            type="button"
+            className="btn btn--sm"
+            disabled={!videoId || !!error}
+            aria-pressed={isFullscreen}
+            onClick={toggleFullscreen}
+          >
+            {isFullscreen ? "🗗 Exit fullscreen" : "⛶ Fullscreen"}
+          </button>
+          {topRightOverlay}
+        </div>
         <div className="player-fallback-row">
           {videoId && needsManualPlay && !error && (
             <button type="button" className="btn btn--yellow" onClick={() => playerRef.current?.playVideo()}>

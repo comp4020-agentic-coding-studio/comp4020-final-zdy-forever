@@ -84,6 +84,7 @@ function snapshot(current: PlaybackState): RoomSnapshot {
       creatorAccountId: "acct-dj",
       visibility: "PUBLIC",
       code: null,
+      roomNumber: "1234567",
       maxUsers: 12,
       autoCloseEnabled: false,
       createdAt: new Date(0).toISOString(),

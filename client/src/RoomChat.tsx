@@ -14,6 +14,7 @@ export function RoomChat({ messages, accountId, connected, error, onSend }: Room
   const [sending, setSending] = useState(false);
   const feedRef = useRef<HTMLDivElement>(null);
   const followRef = useRef(true);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const lastMessage = messages.at(-1);
 
   function scrollToLatest() {
@@ -41,6 +42,13 @@ export function RoomChat({ messages, accountId, connected, error, onSend }: Room
       }
     } finally {
       setSending(false);
+      // Clicking Send moves focus to the button, and the textarea is
+      // disabled (hence blurred) for the brief round trip above either way
+      // — so sending a message would otherwise always cost a manual click
+      // back into the box before the next one. Deferred a frame so this
+      // runs after the re-render that lifts `disabled` actually paints;
+      // calling it synchronously here would still hit a disabled textarea.
+      requestAnimationFrame(() => textareaRef.current?.focus());
     }
   }
 
@@ -86,6 +94,7 @@ export function RoomChat({ messages, accountId, connected, error, onSend }: Room
       <form className="chat-form" onSubmit={send}>
         <div className="chat-input-wrap">
           <textarea
+            ref={textareaRef}
             id="chat-message"
             aria-label="Message"
             value={draft}

@@ -18,6 +18,13 @@ function randomSixDigitCode(): string {
   return String(randomInt(1_000_000)).padStart(6, "0");
 }
 
+// One more digit than a PRIVATE room's code, so the two can never be
+// confused — the join-by-code handler (server/src/index.ts) tells them apart
+// purely by how many digits were typed.
+function randomSevenDigitNumber(): string {
+  return String(randomInt(10_000_000)).padStart(7, "0");
+}
+
 // Pure: whether `room` is due to auto-close as of nowMs, given only its own
 // lastMeaningfulActivityAt — never itself mutates
 // anything, so it's the seam fake-clock tests probe directly. An
@@ -64,24 +71,47 @@ export function touchRoomActivity(db: DatabaseSync, roomId: string, nowMs: numbe
   );
 }
 
-// A code is exclusive only among currently-active (non-closed) rooms — see
-// the rooms_active_code index in db.ts, which is the authority under
-// concurrent writers. This retries past a collision it observes; `generate`
-// is overridable so tests can force one deterministically. Sweeps first so a
-// code held by a room that has just gone auto-close-inactive is correctly
-// treated as free rather than as a live collision.
+// A code/number is exclusive only among currently-active (non-closed) rooms
+// — see the rooms_active_code/rooms_active_number indexes in db.ts, which are
+// the authority under concurrent writers. This retries past a collision it
+// observes. Sweeps first so a token held by a room that has just gone
+// auto-close-inactive is correctly treated as free rather than as a live
+// collision. Shared by generateActiveRoomCode (code, 6 digits, PRIVATE rooms)
+// and generateActiveRoomNumber (roomNumber, 7 digits, PUBLIC rooms) below —
+// `column` is always one of those two fixed literals, never user input.
+function generateActiveRoomToken(
+  db: DatabaseSync,
+  column: "code" | "roomNumber",
+  generate: () => string,
+  nowMs: number,
+): string {
+  sweepInactiveRooms(db, nowMs);
+  const isTaken = db.prepare(`SELECT 1 FROM rooms WHERE ${column} = ? AND closed = 0`);
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const token = generate();
+    if (!isTaken.get(token)) return token;
+  }
+  throw new Error(`could not find a free ${column} after 100 attempts`);
+}
+
+// `generate` is overridable so tests can force a value deterministically.
 export function generateActiveRoomCode(
   db: DatabaseSync,
   generate: () => string = randomSixDigitCode,
   nowMs: number = Date.now(),
 ): string {
-  sweepInactiveRooms(db, nowMs);
-  const isTaken = db.prepare("SELECT 1 FROM rooms WHERE code = ? AND closed = 0");
-  for (let attempt = 0; attempt < 100; attempt++) {
-    const code = generate();
-    if (!isTaken.get(code)) return code;
-  }
-  throw new Error("could not find a free 6-digit room code after 100 attempts");
+  return generateActiveRoomToken(db, "code", generate, nowMs);
+}
+
+// PUBLIC rooms' 7-digit quick-join shortcut — otherwise identical in spirit
+// to generateActiveRoomCode. See the rooms_active_number index comment in
+// db.ts for why the two never collide with each other.
+export function generateActiveRoomNumber(
+  db: DatabaseSync,
+  generate: () => string = randomSevenDigitNumber,
+  nowMs: number = Date.now(),
+): string {
+  return generateActiveRoomToken(db, "roomNumber", generate, nowMs);
 }
 
 function rowToRoom(row: unknown): Room {
@@ -91,6 +121,7 @@ function rowToRoom(row: unknown): Room {
     creatorAccountId: string;
     visibility: "PUBLIC" | "PRIVATE";
     code: string | null;
+    roomNumber: string | null;
     maxUsers: number;
     autoCloseEnabled: number;
     createdAt: string;
@@ -103,6 +134,7 @@ function rowToRoom(row: unknown): Room {
     creatorAccountId: r.creatorAccountId,
     visibility: r.visibility,
     code: r.code,
+    roomNumber: r.roomNumber,
     maxUsers: r.maxUsers,
     autoCloseEnabled: true,
     createdAt: r.createdAt,
@@ -127,6 +159,16 @@ export function getRoomById(db: DatabaseSync, roomId: string, nowMs: number = Da
 export function getActiveRoomByCode(db: DatabaseSync, code: string, nowMs: number = Date.now()): Room | undefined {
   sweepInactiveRooms(db, nowMs);
   const row = db.prepare("SELECT * FROM rooms WHERE code = ? AND closed = 0").get(code);
+  return row ? rowToRoom(row) : undefined;
+}
+
+// PUBLIC rooms' equivalent of getActiveRoomByCode — a 7-digit roomNumber is
+// only ever set on a PUBLIC room (see createRoom), so this can never surface
+// a PRIVATE one; server/src/index.ts's join-by-code handler still double-checks
+// visibility defensively anyway.
+export function getActiveRoomByNumber(db: DatabaseSync, roomNumber: string, nowMs: number = Date.now()): Room | undefined {
+  sweepInactiveRooms(db, nowMs);
+  const row = db.prepare("SELECT * FROM rooms WHERE roomNumber = ? AND closed = 0").get(roomNumber);
   return row ? rowToRoom(row) : undefined;
 }
 
@@ -159,16 +201,23 @@ export function listPublicLobby(
   sweepInactiveRooms(db, nowMs);
   const rows = db
     .prepare(
-      `SELECT roomId, name, maxUsers
+      `SELECT roomId, name, roomNumber, maxUsers
          FROM rooms
         WHERE visibility = 'PUBLIC' AND closed = 0
         ORDER BY createdAt ASC`,
     )
-    .all() as { roomId: string; name: string; maxUsers: number }[];
+    .all() as { roomId: string; name: string; roomNumber: string | null; maxUsers: number }[];
 
   return rows.map((r) => {
     const occupancy = occupancyOf(r.roomId);
-    return { roomId: r.roomId, name: r.name, occupancy, capacity: r.maxUsers, joinable: occupancy < r.maxUsers };
+    return {
+      roomId: r.roomId,
+      name: r.name,
+      roomNumber: r.roomNumber,
+      occupancy,
+      capacity: r.maxUsers,
+      joinable: occupancy < r.maxUsers,
+    };
   });
 }
 
@@ -193,6 +242,9 @@ export function createRoom(db: DatabaseSync, request: CreateRoomRequest): Room {
   const nowMs = Date.now();
   const now = new Date(nowMs).toISOString();
   const code = request.visibility === "PRIVATE" ? generateActiveRoomCode(db) : null;
+  // PUBLIC rooms get the 7-digit quick-join number instead; PRIVATE rooms
+  // never do, symmetrically with PUBLIC rooms never getting a code.
+  const roomNumber = request.visibility === "PUBLIC" ? generateActiveRoomNumber(db) : null;
 
   const room: Room = {
     roomId: randomUUID(),
@@ -200,6 +252,7 @@ export function createRoom(db: DatabaseSync, request: CreateRoomRequest): Room {
     creatorAccountId: request.accountId,
     visibility: request.visibility,
     code,
+    roomNumber,
     maxUsers: MAX_ROOM_USERS,
     autoCloseEnabled: true,
     createdAt: now,
@@ -209,14 +262,15 @@ export function createRoom(db: DatabaseSync, request: CreateRoomRequest): Room {
 
   db.prepare(
     `INSERT INTO rooms
-       (roomId, name, creatorAccountId, visibility, code, maxUsers, autoCloseEnabled, createdAt, lastMeaningfulActivityAt, closed)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (roomId, name, creatorAccountId, visibility, code, roomNumber, maxUsers, autoCloseEnabled, createdAt, lastMeaningfulActivityAt, closed)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     room.roomId,
     room.name,
     room.creatorAccountId,
     room.visibility,
     room.code,
+    room.roomNumber,
     room.maxUsers,
     room.autoCloseEnabled ? 1 : 0,
     room.createdAt,
