@@ -12,10 +12,13 @@ export interface ShareContent {
   url: string;
 }
 
-// The link only ever pre-fills the join input (see App.tsx's effect reading
-// `join` on mount) — it never joins by itself. Opening it still requires
-// clicking Join, exactly like typing the code/number in by hand: sharing a
-// PRIVATE room must not skip the one verification step that makes it private.
+// Opening the link joins the room automatically (see App.tsx's effect
+// reading `join` on mount) — a first-time visitor registers a name first,
+// then joins the moment they do; a returning one joins as soon as their
+// account restores. Knowing the token at all is already everything joining
+// by hand requires, for a PRIVATE room exactly as much as typing its code in
+// would be, so auto-joining from it gives away nothing a manual join
+// wouldn't.
 export function buildShareContent(room: Room): ShareContent | null {
   const token = roomToken(room);
   if (!token) return null;

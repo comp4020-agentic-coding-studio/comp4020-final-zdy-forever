@@ -190,7 +190,10 @@ describe("YoutubePlayer", () => {
     expect(unmuteButton()!.closest("[inert]")).toBeNull();
     act(() => unmuteButton()!.click());
     expect(created[0].player.unMute).toHaveBeenCalledOnce();
-    expect(container.querySelectorAll(".player-fallback-row button")).toHaveLength(0);
+    // "Enable sound" itself is gone once unmuted — only the always-present
+    // Fullscreen toggle (unrelated to mute state) remains in that row.
+    expect(unmuteButton()).toBeUndefined();
+    expect(container.querySelectorAll(".player-fallback-row button")).toHaveLength(1);
     expect(created[0].player.mute).not.toHaveBeenCalled();
     expect(created[0].player.playVideo).not.toHaveBeenCalled();
   });

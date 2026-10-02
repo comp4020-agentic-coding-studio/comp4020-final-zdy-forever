@@ -37,3 +37,58 @@ it.each([
   act(() => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
   expect(propose).toHaveBeenCalledWith(expected);
 });
+
+function typeTime(hours: string, minutes: string, seconds: string) {
+  for (const [index, value] of [hours, minutes, seconds].entries()) {
+    const input = container.querySelectorAll("input")[index];
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+}
+
+function submit() {
+  act(() => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+}
+
+it("silently refuses a time past the track's known duration, with no message and no propose call", () => {
+  act(() => root.render(createElement(SeekControl, { onPropose: propose, getDurationMs: () => 200_000 }))); // 3:20
+  act(() => container.querySelector("button")!.click());
+  typeTime("", "5", "0"); // 5:00 — past the 3:20 track
+  submit();
+  expect(propose).not.toHaveBeenCalled();
+  expect(container.querySelector('[role="alert"]')).toBeNull();
+});
+
+it("accepts a time at exactly the track's duration", () => {
+  act(() => root.render(createElement(SeekControl, { onPropose: propose, getDurationMs: () => 200_000 })));
+  act(() => container.querySelector("button")!.click());
+  typeTime("", "3", "20");
+  submit();
+  expect(propose).toHaveBeenCalledWith(200_000);
+});
+
+it("allows any time while the duration isn't known yet (e.g. the player hasn't reported one)", () => {
+  act(() => root.render(createElement(SeekControl, { onPropose: propose, getDurationMs: () => null })));
+  act(() => container.querySelector("button")!.click());
+  typeTime("1", "0", "0");
+  submit();
+  expect(propose).toHaveBeenCalledWith(3_600_000);
+});
+
+it("collapses back to the plain toggle once a valid seek is proposed", () => {
+  act(() => container.querySelector("button")!.click());
+  typeTime("", "2", "30");
+  submit();
+  expect(propose).toHaveBeenCalledWith(150_000);
+  // Back to its default, closed state — not sitting open with an empty form.
+  expect(container.querySelector("form")).toBeNull();
+  expect(container.querySelector("button")!.getAttribute("aria-expanded")).toBe("false");
+
+  // Reopening shows a blank form, not the time that was already sent.
+  act(() => container.querySelector("button")!.click());
+  for (const input of container.querySelectorAll("input")) {
+    expect((input as HTMLInputElement).value).toBe("");
+  }
+});

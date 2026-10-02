@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useId, useImperativeHandle, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { forwardRef, useEffect, useId, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 // Minimal ambient shape of the bits of the official YouTube IFrame Player
@@ -136,10 +136,6 @@ export interface YoutubePlayerProps {
   // the viewport when not given, so standalone usage (and this component's
   // own tests) keep working without one.
   settingsSlot?: HTMLElement | null;
-  // Rendered top-right, inside the black video frame itself (unlike
-  // settingsSlot above, this never needs to escape to a different part of
-  // the page, so it's a plain node rather than a portal target).
-  topRightOverlay?: ReactNode;
 }
 
 // Always rendered, with or without a videoId — CLAUDE.md requires the
@@ -164,14 +160,14 @@ function setPlayerInteraction(container: HTMLDivElement | null, enabled: boolean
 }
 
 export const YoutubePlayer = forwardRef<YoutubePlayerHandle, YoutubePlayerProps>(function YoutubePlayer(
-  { videoId, onStateChange, onReady, onSettingsClosed, settingsSlot, topRightOverlay },
+  { videoId, onStateChange, onReady, onSettingsClosed, settingsSlot },
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
   // The outer black frame (never inert, unlike containerRef above) — what
-  // actually goes fullscreen, so the toggle button itself (and Share, when
-  // present) stays reachable while fullscreen rather than disappearing along
-  // with an inert inner screen.
+  // actually goes fullscreen, so the toggle button itself stays reachable
+  // while fullscreen rather than disappearing along with an inert inner
+  // screen.
   const playerBoxRef = useRef<HTMLDivElement>(null);
   const screenId = useId();
   const [isReady, setIsReady] = useState(false);
@@ -437,7 +433,11 @@ export const YoutubePlayer = forwardRef<YoutubePlayerHandle, YoutubePlayerProps>
         />
         {!videoId && <p>No track is playing.</p>}
         {error && <p role="alert">{error}</p>}
-        <div className="player-top-right-row">
+        {/* Top-right is where YouTube's own "tap to unmute" title-card icon
+            likes to render (it's inside the cross-origin iframe, so there's
+            no way to reposition or hide that one) — kept here on the
+            opposite corner instead so the two can never visually collide. */}
+        <div className="player-fallback-row">
           <button
             type="button"
             className="btn btn--sm"
@@ -447,9 +447,6 @@ export const YoutubePlayer = forwardRef<YoutubePlayerHandle, YoutubePlayerProps>
           >
             {isFullscreen ? "🗗 Exit fullscreen" : "⛶ Fullscreen"}
           </button>
-          {topRightOverlay}
-        </div>
-        <div className="player-fallback-row">
           {videoId && needsManualPlay && !error && (
             <button type="button" className="btn btn--yellow" onClick={() => playerRef.current?.playVideo()}>
               ▶ Enable playback

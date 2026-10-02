@@ -75,7 +75,7 @@ Maximum 12 users.
 
 Private codes, and public room numbers, must each be checked for active collisions. A room's code/number is exclusive only while it's open; a closed room's frees up for reuse. The "join a room" input is a single field: 6 digits means a private code, 7 digits means a public room number — the two lengths are deliberately different so one input can always tell which is meant.
 
-Sharing a room (a copyable link, or the native share sheet) only ever pre-fills that join input for whoever opens it. It never joins on its own, for a public room exactly as much as a private one — joining still always takes an explicit click, which is the one verification step a private room's code must never be allowed to skip.
+Sharing a room (a copyable link, or the native share sheet) carries its code/number, and opening it joins automatically — a first-time visitor registers a name first, then joins the moment they do. Knowing the code/number at all is already everything a manual join requires, so this gives away nothing a typed-in code wouldn't.
 
 Every room automatically closes after 2 hours of inactivity. This is mandatory,
 including legacy rooms; there is no creation-form toggle or client opt-out.

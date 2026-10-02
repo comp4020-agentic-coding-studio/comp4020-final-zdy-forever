@@ -201,20 +201,38 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // A shared link (see share.ts) only ever pre-fills the join input — it
-  // never joins by itself, for a PRIVATE room exactly as much as a PUBLIC
-  // one, so opening one always still requires an explicit Join click (that's
-  // the one verification step a private room's code must never be allowed to
-  // skip). The query string is stripped right away so neither a refresh nor
-  // copying the URL bar again carries a stale code/number forward.
+  // A shared link (see share.ts) carries the room's code/number in `?join=`.
+  // Captured once on mount and stripped right away, so neither a refresh nor
+  // copying the URL bar again carries a stale code/number forward. Shown in
+  // the join input immediately — visible proof of which room this link is
+  // for while a first-time visitor is still picking a name — the actual
+  // join happens below, once an account exists to join with.
+  const [pendingJoinCode, setPendingJoinCode] = useState<string | null>(null);
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const join = params.get("join");
     if (join && /^\d{6}$|^\d{7}$/.test(join)) {
+      setPendingJoinCode(join);
       setCodeInput(join);
       window.history.replaceState(null, "", window.location.pathname);
     }
   }, []);
+
+  // Waits for an account — a first-time visitor following a shared link
+  // lands on the name-picker first, then joins automatically the moment
+  // they register; a returning one joins as soon as /api/session restores
+  // their account. Overrides whatever room that restore would otherwise
+  // have resumed: a freshly-clicked invite is a clearer signal of intent
+  // than a stale previous session.
+  useEffect(() => {
+    if (!pendingJoinCode || !accountId) return;
+    const code = pendingJoinCode;
+    setPendingJoinCode(null);
+    void joinByCodeValue(code);
+    // joinByCodeValue only calls stable state setters; accountId is the only
+    // real dependency besides the code itself.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingJoinCode, accountId]);
 
   // Not being in the room any more — the socket join refused (room full,
   // closed, gone) or the room closed under us — means back to the lobby,
@@ -253,15 +271,21 @@ function App() {
     enterRoom(result.data.room.roomId);
   };
 
-  const joinByCode = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const result = await postJson<JoinRoomResult>("/api/rooms/join-by-code", { ...credentials(), code: codeInput });
+  // Shared by the manual "Join a room" form and the ?join= auto-join effect
+  // above — same request, same success/failure handling, either way.
+  const joinByCodeValue = async (code: string) => {
+    const result = await postJson<JoinRoomResult>("/api/rooms/join-by-code", { ...credentials(), code });
     if (!result.ok) {
       setRoomActionError(result.error);
       return;
     }
     setCodeInput("");
     enterRoom(result.data.room.roomId);
+  };
+
+  const joinByCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await joinByCodeValue(codeInput);
   };
 
   const handleShare = async () => {
@@ -321,16 +345,6 @@ function App() {
         onReady={live.handlePlayerReady}
         onSettingsClosed={live.handlePlayerReady}
         settingsSlot={settingsSlot}
-        topRightOverlay={
-          live.room && (
-            <>
-              <button type="button" className="btn btn--sm btn--purple" onClick={() => void handleShare()}>
-                🔗 Share
-              </button>
-              {shareCopied && <span className="sticker sticker--live">copied!</span>}
-            </>
-          )
-        }
       />
       {live.playback && (
         <p>
@@ -443,7 +457,6 @@ function App() {
           <input
             value={codeInput}
             onChange={(e) => setCodeInput(e.target.value.replace(/\D/g, ""))}
-            placeholder="6-digit code or 7-digit room number"
             aria-label="room code or number"
             inputMode="numeric"
             pattern="\d{6}|\d{7}"
@@ -531,15 +544,26 @@ function App() {
         </span>
         {live.room && <strong className="room-bar-name">{live.room.name}</strong>}
         {live.room?.visibility === "PRIVATE" && live.room.code && (
-          <span className="sticker sticker--code" aria-label={`private room code ${live.room.code}`}>
+          <button
+            type="button"
+            className="sticker sticker--code"
+            aria-label={`private room code ${live.room.code} — click to copy an invite link`}
+            onClick={() => void handleShare()}
+          >
             🔒 {live.room.code}
-          </span>
+          </button>
         )}
         {live.room?.visibility === "PUBLIC" && live.room.roomNumber && (
-          <span className="sticker sticker--code" aria-label={`public room number ${live.room.roomNumber}`}>
-            🔢 {live.room.roomNumber}
-          </span>
+          <button
+            type="button"
+            className="sticker sticker--code"
+            aria-label={`public room number ${live.room.roomNumber} — click to copy an invite link`}
+            onClick={() => void handleShare()}
+          >
+            #️⃣ {live.room.roomNumber}
+          </button>
         )}
+        {shareCopied && <span className="sticker sticker--live">copied!</span>}
         {live.room && (
           <RoomMembersPopover key={liveRoomId} members={live.presence}
             capacity={live.room.maxUsers} dj={live.playback?.dj ?? null} />
@@ -627,7 +651,14 @@ function App() {
             ⏭ Propose Skip
           </button>
           {accountId === live.playback.dj.accountId && (
-            <SeekControl key={live.playback.playbackId} onPropose={live.requestSeekProposal} />
+            <SeekControl
+              key={live.playback.playbackId}
+              onPropose={live.requestSeekProposal}
+              getDurationMs={() => {
+                const seconds = playerRef.current?.getDuration() ?? 0;
+                return seconds > 0 ? seconds * 1000 : null;
+              }}
+            />
           )}
         </div>
       )}

@@ -457,12 +457,30 @@ form {
   transform: rotate(3deg);
 }
 
-/* A private room's join code, big enough to read out across a room. */
+/* A private room's code or a public room's number, big enough to read out
+   across a room. Also doubles as the share button (click to copy an invite
+   link) — kept level (not the generic .sticker tilt) and given its own
+   hover/press feedback so it reads as a control, not just decoration. */
 .sticker--code {
   background: var(--candy-yellow);
   font-size: 1.05rem;
   letter-spacing: 0.12em;
   font-variant-numeric: tabular-nums;
+  transform: none;
+  font: inherit;
+  cursor: pointer;
+  transition:
+    transform 0.15s var(--bounce),
+    box-shadow 0.15s var(--bounce);
+}
+
+.sticker--code:hover {
+  transform: translateY(-2px);
+}
+
+.sticker--code:active {
+  transform: translateY(2px);
+  box-shadow: none;
 }
 
 /* ============================================================ room bar */
@@ -720,22 +738,14 @@ form {
   background: rgba(0, 0, 0, 0.6);
 }
 
-/* Kept at the TOP of the player, not the bottom: YouTube's own control bar
-   (scrubber, play/pause, volume, fullscreen) sits at the bottom edge of the
-   iframe, and a fallback button placed there would sit on top of it. */
+/* Kept at the TOP-LEFT of the player, never the bottom (YouTube's own
+   control bar — scrubber, play/pause, volume, fullscreen — sits at the
+   bottom edge of the iframe) and never the top-right (that's where
+   YouTube's own "tap to unmute" title-card icon likes to render, inside the
+   cross-origin iframe where we can neither reposition nor hide it). */
 .player-fallback-row {
   position: absolute;
   left: 0.75rem;
-  top: 0.75rem;
-  display: flex;
-  gap: 0.5rem;
-}
-
-/* Mirrors .player-fallback-row on the opposite corner — kept clear of
-   YouTube's own bottom control bar for the same reason. */
-.player-top-right-row {
-  position: absolute;
-  right: 0.75rem;
   top: 0.75rem;
   display: flex;
   align-items: center;
