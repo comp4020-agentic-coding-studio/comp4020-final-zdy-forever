@@ -1,80 +1,74 @@
 # Watch YouTube Together
 
-A good shared listening room should make people feel they are genuinely
-listening together, not that one person is broadcasting to passive
-listeners. Every mechanical constraint here — the room cap, the vote, the
-track-scoped DJ, the room-scoped chat — exists to protect that feeling. This
-argues why, grounded in what the code enforces, not what it merely hopes for.
+A good shared listening room should make users feel that they are watching something together, rather than one person controlling everything while everyone else simply follows. Because of this, the main design principle of Watch YouTube Together is simple: actions that do not affect other users can happen freely, while actions that change what everyone is watching require agreement.
+
+## Where this started
+
+The idea was inspired by Spotify Jam and QQ Music's "listen together" feature. Both allow a small group of people to share control of the same media session.
+
+My original idea was to build something similar for music. However, I did not have access to a licensed music source or a YouTube Data API key. Since YouTube provides an official embeddable player, I changed the idea from "listen together" to "watch together".
+
+The main idea stayed the same: a small group shares one media session and no single user has complete control.
 
 ## Shared presence
 
-Presence has to be small enough to be legible. Watch YouTube Together caps every room at
-12 participants (`MAX_ROOM_USERS`, `server/src/rooms.ts`) so the presence
-list stays something a person can read at a glance, not a number that
-scrolls off screen. Presence lives only in memory (`server/src/presence.ts`),
-never persisted; a reconnect or late join always replays from an
-authoritative server snapshot (`server/src/realtime.ts`) rather than
-trusting what the client remembered, so nobody's view of who's in the room
-can silently drift from the server's.
+Each room has a maximum of 12 users (`MAX_ROOM_USERS`, `server/src/rooms.ts`). I chose a small room size because the application is designed for groups of friends rather than a large public audience.
+
+The server keeps track of who is currently in the room (`server/src/presence.ts`). If a user refreshes the page or reconnects, the client gets the current room state from the server instead of relying on old information stored in the browser.
+
+This helps make sure that everyone sees the same room membership and state.
 
 ## Shared control
 
-Broadcasting has one operator; a shared room has none. Play, pause, skip,
-seek, queue removal, and reorder all require a vote — a 15-second window,
-YES/NO, non-responses counted as abstain and excluded from the denominator,
-a minimum of two non-abstaining votes, and `floor(validVotes / 2) + 1`
-required yeses, with a tie failing (`shared/src/voting.ts`). Someone alone in
-a room has nobody to vote with, so their own proposals pass straight away
-rather than never. Every proposal
-carries the playback or queue revision it was opened against, so a vote that
-resolves late can never land on a state that has already moved on. Voting
-only guards actions that take something away from the room; adding a song,
-joining, leaving, and chatting need none, because none of them removes
-anyone else's agency.
+Actions such as Play, Pause, Skip, Seek, Remove and Reorder affect everyone in the room, so they require a vote.
 
-The DJ starts as the current track's adder. When leaving, they have 10 seconds
-to select a successor; the server randomly selects a remaining member on timeout.
-With zero or one successor, no dialog is needed. A persisted per-playback override
-keeps the handoff separate from who added the track. The next track starts with
-its own adder, with a fallback if they are absent. All rooms automatically close
-after two hours without meaningful activity; this cannot be disabled.
+A vote lasts for 15 seconds. Users can vote YES or NO, while users who do not respond are treated as abstaining. The proposal passes when more than half of the valid votes are YES. A tie fails.
 
-That a vote passes or fails is mechanical. Whether 15 seconds and a bare
-majority actually *feel* fair to a room of 12 is a judgement this codebase
-can't verify on its own — that's for playtesting, not a test suite.
+If only one user is in the room, the action can happen immediately because there is nobody else who would be affected.
+
+Each proposal is also linked to the room state that existed when the vote started. If the room state changes before the vote finishes, an old vote cannot incorrectly change the newer state.
+
+Actions such as adding a song, joining, leaving and chatting do not require a vote because they do not directly interrupt what other users are currently watching.
+
+The user who added the current track becomes its DJ. This role is linked to the user rather than to a browser tab. If the DJ disconnects, the role can be passed to another active member so that the room does not become stuck.
+
+Rooms also close automatically after two hours without activity.
 
 ## Room chat
 
-Everyone in a room can chat, including while the queue is empty. Messages
-show who sent them and when, and are delivered only to members of that room.
-Refreshing or reconnecting restores the room's chat history from SQLite.
-Messages are plain text, limited to 500 characters and eight sends per account
-per room in ten seconds. Sending counts as room activity.
+Everyone in the room can use chat, even when there is no song in the queue. Chat does not require a vote because sending a message does not interrupt other users' playback.
 
-Chat history lasts exactly as long as the room: closing a room deletes its
-messages in the same database operation and clears connected clients. An
-inactivity sweep includes unoccupied rooms and runs at startup and once a
-minute. Message text is never copied into the server logs.
+Messages are limited to 500 characters. To reduce spam, each account can send up to eight messages in ten seconds in the same room.
 
-## Why YouTube, despite the constraints
+Messages are stored in SQLite, so they remain after a refresh or reconnect. However, they only exist for the lifetime of the room. When the room is deleted, its messages are also deleted.
 
-Only YouTube's official oEmbed endpoint (for video details) and the visible
-IFrame Player are used — never
-`yt-dlp`, audio extraction, or hidden playback. That rules out
-sample-perfect audio sync: ads, buffering, and per-viewer autoplay
-restrictions all exist. The server never chases perfect alignment; it holds
-an authoritative anchor (`videoId`, `status`, `anchorPositionMs`,
-`anchorServerTimeMs`, `revision`) that clients converge toward, tolerating
-small drift and correcting large drift through the official player API.
-Synchronization means convergence, not identical audio samples — accepted
-because it's the only path that respects YouTube's own terms.
+Chat message content is not written into the server logs.
 
-## What's mechanical, what isn't
+## Why YouTube
 
-The room cap, vote thresholds, revision-checked proposals, and track-scoped
-DJ lookup are enforced by code and covered by tests (`server/src/*.test.ts`;
-`docs/adr/` records the decisions behind them in detail).
-Whether a 12-person cap, a 15-second window, or room chat
-actually *produce* the feeling of listening together is not something this
-repository can assert for itself — that judgement belongs to the people
-using the room.
+The application only uses YouTube's official oEmbed endpoint and IFrame Player. It does not use tools such as `yt-dlp`, audio extraction, or hidden playback.
+
+Because of YouTube's own behaviour, perfectly identical playback between users is not realistic. Different users may experience buffering, ads, autoplay restrictions or different network conditions.
+
+Instead, the server stores the current video, playback state, position and time. Clients then adjust themselves toward that shared state.
+
+The goal is therefore to keep users reasonably synchronised, rather than trying to make every browser match at the exact millisecond.
+
+## What I chose not to build
+
+- **No search** — without a YouTube Data API key, users add videos by pasting links.
+- **No complex account system** — the application is designed for friends joining a temporary room, not for building long-term user profiles.
+- **No voice chat** — voice would compete with the video's audio, and users can already use existing voice applications if they need it.
+- **No recommendation system** — the main purpose of the room is for users to share content with each other, rather than receive algorithmic recommendations.
+
+## What I can prove and what I cannot
+
+Some parts of the design are directly enforced by code and tests. For example, the room size limit, voting rules, proposal checks and DJ behaviour can all be tested.
+
+However, some design choices are about user experience rather than correctness.
+
+For example, the code can prove that the room allows a maximum of 12 users, but it cannot prove that 12 is the ideal number of people for a shared watching experience. In the same way, the system can enforce a 15-second voting period, but tests cannot prove that users will find 15 seconds comfortable.
+
+So far, I have mainly tested the system myself using multiple browser tabs. This can show that the rules work technically, but it cannot fully show whether real groups of users will enjoy the experience.
+
+The main goal of the current design is therefore to enforce clear shared-control rules while keeping the application simple enough for a small group of people to use together.
