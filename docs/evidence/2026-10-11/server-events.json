@@ -1,0 +1,151 @@
+[
+  {
+    "action": "ROOM_CREATE",
+    "result": "ok",
+    "roomId": "test-room",
+    "accountId": "participant-A",
+    "timestamp": "2026-10-11T07:27:23.039Z"
+  },
+  {
+    "action": "ROOM_JOIN",
+    "result": "ok",
+    "roomId": "test-room",
+    "accountId": "participant-A",
+    "timestamp": "2026-10-11T07:27:23.226Z"
+  },
+  {
+    "action": "ROOM_JOIN",
+    "result": "ok",
+    "roomId": "test-room",
+    "accountId": "participant-B",
+    "timestamp": "2026-10-11T07:27:35.420Z"
+  },
+  {
+    "action": "TRACK_ADD",
+    "result": "ok",
+    "roomId": "test-room",
+    "accountId": "participant-A",
+    "detail": "dQw4w9WgXcQ",
+    "timestamp": "2026-10-11T07:27:36.126Z"
+  },
+  {
+    "action": "CHAT_SEND",
+    "result": "ok",
+    "roomId": "test-room",
+    "accountId": "participant-B",
+    "timestamp": "2026-10-11T07:28:11.168Z"
+  },
+  {
+    "action": "PROPOSAL_CREATE",
+    "result": "ok",
+    "roomId": "test-room",
+    "accountId": "participant-A",
+    "proposalId": "proposal-1",
+    "detail": "PAUSE",
+    "timestamp": "2026-10-11T07:28:11.760Z"
+  },
+  {
+    "action": "PROPOSAL_FAIL",
+    "result": "ok",
+    "roomId": "test-room",
+    "proposalId": "proposal-1",
+    "accountId": "participant-A",
+    "detail": "PAUSE",
+    "timestamp": "2026-10-11T07:28:26.762Z"
+  },
+  {
+    "action": "PROPOSAL_CREATE",
+    "result": "ok",
+    "roomId": "test-room",
+    "accountId": "participant-A",
+    "proposalId": "proposal-2",
+    "detail": "PAUSE",
+    "timestamp": "2026-10-11T07:28:45.147Z"
+  },
+  {
+    "action": "VOTE_CAST",
+    "result": "ok",
+    "roomId": "test-room",
+    "accountId": "participant-B",
+    "proposalId": "proposal-2",
+    "detail": "YES",
+    "timestamp": "2026-10-11T07:28:45.761Z"
+  },
+  {
+    "action": "PROPOSAL_PASS",
+    "result": "ok",
+    "roomId": "test-room",
+    "proposalId": "proposal-2",
+    "accountId": "participant-A",
+    "detail": "PAUSE",
+    "timestamp": "2026-10-11T07:28:45.761Z"
+  },
+  {
+    "action": "PLAYBACK_CHANGE",
+    "result": "ok",
+    "roomId": "test-room",
+    "proposalId": "proposal-2",
+    "playbackId": "playback-1",
+    "revision": 2,
+    "detail": "PAUSE",
+    "timestamp": "2026-10-11T07:28:45.763Z"
+  },
+  {
+    "action": "PROPOSAL_CREATE",
+    "result": "ok",
+    "roomId": "test-room",
+    "accountId": "participant-A",
+    "proposalId": "proposal-3",
+    "detail": "SKIP",
+    "timestamp": "2026-10-11T07:33:55.273Z"
+  },
+  {
+    "action": "PROPOSAL_FAIL",
+    "result": "ok",
+    "roomId": "test-room",
+    "proposalId": "proposal-3",
+    "accountId": "participant-A",
+    "detail": "SKIP",
+    "timestamp": "2026-10-11T07:34:10.275Z"
+  },
+  {
+    "action": "PROPOSAL_CREATE",
+    "result": "ok",
+    "roomId": "test-room",
+    "accountId": "participant-A",
+    "proposalId": "proposal-4",
+    "detail": "SKIP",
+    "timestamp": "2026-10-11T07:34:27.212Z"
+  },
+  {
+    "action": "ROOM_LEAVE",
+    "result": "ok",
+    "roomId": "test-room",
+    "accountId": "participant-B",
+    "timestamp": "2026-10-11T07:34:27.605Z"
+  },
+  {
+    "action": "PROPOSAL_PASS",
+    "result": "ok",
+    "roomId": "test-room",
+    "proposalId": "proposal-4",
+    "accountId": "participant-A",
+    "detail": "SKIP",
+    "timestamp": "2026-10-11T07:34:42.213Z"
+  },
+  {
+    "action": "PLAYBACK_CHANGE",
+    "result": "ok",
+    "roomId": "test-room",
+    "proposalId": "proposal-4",
+    "detail": "skip",
+    "timestamp": "2026-10-11T07:34:42.214Z"
+  },
+  {
+    "action": "ROOM_LEAVE",
+    "result": "ok",
+    "roomId": "test-room",
+    "accountId": "participant-A",
+    "timestamp": "2026-10-11T07:35:04.951Z"
+  }
+]

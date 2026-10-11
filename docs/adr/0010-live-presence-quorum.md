@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted. Amends a consequence of ADR 0004 (see below).
+Partially superseded by ADR 0012: the minimum-turnout rule below no longer applies.
+Heartbeat tuning and rechecking an open vote after departure remain in effect.
+This record preserves the original decision and its limitations.
 
 ## Context
 

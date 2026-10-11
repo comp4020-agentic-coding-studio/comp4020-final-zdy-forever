@@ -77,8 +77,6 @@ export interface ProposalBroadcast {
 
 export const VOTING_WINDOW_MS = 15_000;
 
-export const MIN_NON_ABSTAIN_VOTES = 2;
-
 export interface CreateProposalParams {
   proposalId: string;
   proposer: string;
@@ -153,15 +151,10 @@ export interface VoteTally {
 // majority of non-abstain votes, so an exact tie (e.g. 2 YES / 2 NO) always
 // fails without needing a separate tie-check.
 //
-// `presentCount`, when given, is how many distinct accounts are live in the
-// room right now (server/src/presence.ts) — the most votes this proposal
-// could ever still receive. MIN_NON_ABSTAIN_VOTES is a ceiling on that, not
-// a fixed floor: once presentCount itself drops below 2 (a second voter was
-// never real, or left mid-vote), requiring 2 valid votes would deadlock the
-// room forever, so the requirement relaxes to whatever is actually still
-// possible (docs/adr/0010). Omitting presentCount keeps the old fixed-2
-// behaviour, for callers (and tests) with no notion of live presence.
-export function tallyVotes(votes: Record<string, VoteChoice>, presentCount?: number): VoteTally {
+// Presence determines when a vote may finish early, not whether abstentions
+// can block the result. At the deadline, one YES and no NO passes even when
+// other members remain connected. Zero ballots and ties still fail.
+export function tallyVotes(votes: Record<string, VoteChoice>): VoteTally {
   let yes = 0;
   let no = 0;
   for (const choice of Object.values(votes)) {
@@ -170,8 +163,7 @@ export function tallyVotes(votes: Record<string, VoteChoice>, presentCount?: num
   }
   const validVotes = yes + no;
   const requiredYes = Math.floor(validVotes / 2) + 1;
-  const requiredMinimum = presentCount === undefined ? MIN_NON_ABSTAIN_VOTES : Math.min(MIN_NON_ABSTAIN_VOTES, presentCount);
-  const passed = validVotes >= requiredMinimum && yes >= requiredYes;
+  const passed = yes >= requiredYes;
   return { yes, no, validVotes, requiredYes, passed };
 }
 
@@ -180,22 +172,18 @@ export function tallyVotes(votes: Record<string, VoteChoice>, presentCount?: num
 // before expiresAt (the deadline path; the server may settle earlier once
 // every present account has voted) and once
 // already resolved (idempotent — safe to call repeatedly, e.g. from a
-// periodic sweep, without double-deciding a proposal). See tallyVotes for
-// what `presentCount` does to the minimum-votes requirement.
-export function resolveProposal(proposal: Proposal, nowMs: number, presentCount?: number): Proposal {
+// periodic sweep, without double-deciding a proposal).
+export function resolveProposal(proposal: Proposal, nowMs: number): Proposal {
   if (proposal.state !== "OPEN") return proposal;
   if (nowMs < proposal.expiresAt) return proposal;
 
-  const tally = tallyVotes(proposal.votes, presentCount);
+  const tally = tallyVotes(proposal.votes);
   return { ...proposal, state: tally.passed ? "PASSED" : "FAILED" };
 }
 
-// A proposal may execute only once resolved to PASSED. Since resolveProposal
-// only ever produces PASSED after the voting window has actually closed with
-// a strict non-abstain majority, this single check is what makes "an expired
-// proposal cannot execute" automatic: a proposal that expired without ever
-// being resolved is still OPEN (not PASSED), and one resolved to FAILED
-// (whether from too few votes or a tie) is not PASSED either.
+// A proposal may execute only once resolved to PASSED, either at the deadline
+// or after every present account has voted. An unresolved proposal is still
+// OPEN, and one resolved to FAILED (no YES votes or a tie) cannot execute.
 export function canExecute(proposal: Proposal): boolean {
   return proposal.state === "PASSED";
 }

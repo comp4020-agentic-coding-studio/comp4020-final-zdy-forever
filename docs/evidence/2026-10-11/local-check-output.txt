@@ -1,0 +1,16 @@
+$ pnpm typecheck && pnpm test
+$ tsc --noEmit && pnpm -r --if-present run typecheck
+Scope: 2 of 3 workspace projects
+client typecheck$ tsc --noEmit
+server typecheck$ tsc --noEmit
+server typecheck: Done
+client typecheck: Done
+$ vitest run
+
+ RUN  v5.0.1 <checkout>
+
+
+ Test Files  26 passed (26)
+      Tests  410 passed (410)
+   Start at  18:42:47
+   Duration  16.66s (tests 81%, environment 11%, import 5%, transform 3%)

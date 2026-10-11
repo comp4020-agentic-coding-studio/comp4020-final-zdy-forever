@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { io as ioClient, type Socket as ClientSocket } from "socket.io-client";
 import { afterEach, describe, expect, inject, it } from "vitest";
+import type { ProposalBroadcast } from "../shared/src/voting.ts";
 
 // This repo's brief: anyone can speak freely — chat, or add a song — because
 // neither takes anything away from anyone else, so neither needs a vote.
@@ -66,6 +67,43 @@ function sleep(ms: number): Promise<void> {
 }
 
 describe("the brief: adding never votes, interrupting the room always does", () => {
+  it("passes Skip after the full window when another connected member abstains", async () => {
+    const alice = await register("Alice");
+    const bob = await register("Bob");
+    const roomId = await createRoom(alice);
+    const aliceSocket = await connect(alice);
+    await joinRoom(aliceSocket, roomId);
+    const bobSocket = await connect(bob);
+    await joinRoom(bobSocket, roomId);
+    const added = await post(`/api/rooms/${roomId}/queue`, { ...alice, input: SONG_ID });
+    expect(added.status).toBe(201);
+
+    const opened = Promise.all([
+      waitFor<ProposalBroadcast>(aliceSocket, "proposal:update"),
+      waitFor<ProposalBroadcast>(bobSocket, "proposal:update"),
+    ]);
+    aliceSocket.emit("proposal:request", { type: "SKIP" });
+    const [aliceOpened, first] = await opened;
+    expect(aliceOpened).toEqual(first);
+    expect(first.proposal.state).toBe("OPEN");
+    expect(first.applied).toBe(false);
+    expect(first.proposal.expiresAt - first.proposal.createdAt).toBe(15_000);
+
+    // Bob stays connected and can still vote, but sends no ballot. Both
+    // clients must receive the same successful result at the deadline.
+    const [aliceResult, bobResult] = await Promise.all([
+      waitFor<ProposalBroadcast>(aliceSocket, "proposal:update"),
+      waitFor<ProposalBroadcast>(bobSocket, "proposal:update"),
+    ]);
+    expect(Date.now()).toBeGreaterThanOrEqual(first.proposal.expiresAt);
+    expect(aliceResult).toEqual(bobResult);
+    expect(bobResult.proposal.proposalId).toBe(first.proposal.proposalId);
+    expect(bobResult.proposal.votes).toEqual({ [alice.accountId]: "YES" });
+    expect(bobResult.proposal.state).toBe("PASSED");
+    expect(bobResult.applied).toBe(true);
+    expect(bobSocket.connected).toBe(true);
+  }, 25_000);
+
   it("adding a track to the queue never opens a vote", async () => {
     const alice = await register("Alice");
     const bob = await register("Bob");

@@ -30,3 +30,26 @@ can judge; those are left to the crit and the marker.
 At a crit, a green `check` job is half the shipped mark, but it's never the
 judgement of the work: your tutor checks what you deployed against the published
 spec.
+
+## This project's promises and evidence
+
+The course invariants above remain unchanged. These additional checks support
+the definition of good in [README.md](../README.md); they do not replace human
+judgement of the shared-viewing experience.
+
+| Promise | Existing checks | What still needs judgement or external evidence |
+| --- | --- | --- |
+| Contribute freely; vote before interrupting shared playback. | [brief.test.ts](brief.test.ts) checks direct addition and a Pause proposal broadcast to another client; [proposals.test.ts](../server/src/proposals.test.ts) exercises other proposal types and stale references. | Whether voting feels fair and understandable to an unfamiliar group. |
+| An abstainer remains connected and does not block a majority at the deadline. | [voting.test.ts](../server/src/voting.test.ts), [proposals.test.ts](../server/src/proposals.test.ts), and the two-socket Skip test in [brief.test.ts](brief.test.ts). | The corrected version passed a deployed two-connection test; the formal two-classmate exercise remains separate. |
+| Capacity concerns distinct present accounts, not historical membership or tabs. | [presence.test.ts](../server/src/presence.test.ts) and [realtime.test.ts](../server/src/realtime.test.ts). | Whether 12 is a comfortable group size; tests only enforce the selected limit. |
+| Open-room state survives reconnects and storage reopening. | [rooms.test.ts](../server/src/rooms.test.ts), [queue.test.ts](../server/src/queue.test.ts), [playback.test.ts](../server/src/playback.test.ts) and [chat.test.ts](../server/src/chat.test.ts) cover persisted state and recovery. | These checks do not demonstrate a real redeploy or meaningful next-day return after two-hour expiry. |
+| Server identity and permissions govern shared actions. | [realtime.test.ts](../server/src/realtime.test.ts), [djHandoff.test.ts](../server/src/djHandoff.test.ts) and [chatRealtime.test.ts](../server/src/chatRealtime.test.ts) include rejection and identity cases. | Successful ordinary-use logs are not an adversarial security audit. |
+| Logs expose actions and actors without recording chat text. | [logging.test.ts](../server/src/logging.test.ts) and the [11 October rehearsal](../docs/evidence/2026-10-11/README.md). | Crit 10 still needs two classmates and log-only narration by the student. |
+
+Run the app separately, then use `APP_URL=http://localhost:8080 pnpm check`
+for type checks and the complete suite. Set `APP_URL` to the actual local port.
+`pnpm check:evidence` verifies that PROCESS commit citations resolve; it cannot
+validate the truth of personal experience or the strength of an argument.
+
+The [evidence bundle](../docs/evidence/2026-10-11/README.md) records the checks
+already run and distinguishes local results from the earlier deployment.

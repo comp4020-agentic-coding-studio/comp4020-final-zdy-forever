@@ -1,69 +1,35 @@
-# ADR 0011: SQLite in WAL mode, synchronous = NORMAL
+# ADR 0011: SQLite WAL mode and synchronous = NORMAL
 
 ## Status
 
-Accepted.
+Implemented in [3863e71](https://github.com/comp4020-agentic-coding-studio/comp4020-final-zdy-forever/commit/3863e71). Evidence wording corrected on 11 October 2026. This is a database configuration decision, not a verified diagnosis of playback buffering.
 
-## Context
+## Observed problem and evidence limits
 
-Reported symptom: video playback occasionally stutters, worse the more people
-are in a room (or the more rooms are active on the same deployment at once).
+The owner observed occasional video buffering on the deployed website even with two users. They asked the coding agent to inspect logs; the agent reported a fix. The owner did not independently identify the cause.
 
-`node:sqlite`'s `DatabaseSync` is synchronous — every call blocks the single
-Node.js event loop that also has to promptly relay every room's
-`proposal:update`/`playback:update`/presence events. The database was opened
-with no `journal_mode`/`synchronous` pragma set, i.e. SQLite's defaults:
-rollback-journal mode with `synchronous = FULL`. Under that mode, every write
-transaction takes an exclusive lock on the *whole* database file and calls
-`fsync()` as part of its commit. `logAction` alone — called on every vote,
-chat message, join, proposal create/pass/fail, and playback change — did two
-such commits per call (the insert, then `pruneOldLogs`'s delete). More people
-means more of these actions happening concurrently, so more frequent, longer
-event-loop stalls — which is exactly what would show up as stutter, since it
-delays delivering the very playback-sync messages the client needs.
+The earlier account reported a local benchmark of 500 insert/delete commits and an approximately 17-fold improvement. No original measurement output or reproducible benchmark script has been retained with this ADR. The owner did not run or interpret it. Treat the magnitude as an unverified agent report, not a measured project result. There is also no controlled playback comparison connecting that number to the buffering symptom.
 
-A local benchmark (500 commits of "insert + delete", same shape as
-`logAction`) measured ~0.2ms/commit under the old defaults versus ~0.01ms/commit
-in WAL mode — roughly 17x on this machine's local SSD. On a cloud disk, where
-`fsync` typically costs far more than on local NVMe, the absolute gap would be
-larger still.
+A plausible concern is that `node:sqlite`'s `DatabaseSync` operations share the Node event loop with realtime message handling. Reducing time spent writing could improve responsiveness. This mechanism alone does not establish that database writes caused the observed video buffering: player behaviour and network conditions remain untested alternatives.
 
 ## Decision
 
-`server/src/db.ts`'s `openDatabase` now runs, right after opening the file:
+`server/src/db.ts` configures file-backed databases with:
 
+```sql
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous = NORMAL;
 ```
-PRAGMA journal_mode = WAL
-PRAGMA synchronous = NORMAL
-```
 
-This is SQLite's own documented pairing for "one connection, frequent small
-writes" — not something specific to this app. A commit in WAL mode is a
-sequential append to a separate `-wal` file rather than an in-place,
-exclusively-locked rewrite of the main file, and `synchronous = NORMAL` skips
-the `fsync` on every commit (only syncing at WAL checkpoints). It's a no-op
-for an in-memory database (`:memory:`, used by tests), which SQLite never
-puts into WAL mode regardless.
+`server/src/logging.ts` groups the action-log insert and pruning delete in one transaction rather than two separate autocommits, and catches logging failures. SQLite does not switch an in-memory database to WAL, so in-memory test performance is not evidence for this file-backed configuration.
 
-`logAction` (`server/src/logging.ts`) also now wraps its insert and
-`pruneOldLogs`'s delete in one transaction instead of two autocommits — it's
-the single hottest write path in the app (every meaningful action calls it),
-so halving its commit count compounds with the pragma change above. The
-rollback itself is wrapped in its own try/catch, since it can throw too (e.g.
-the database already closed) — `logAction` must never throw regardless
-(CLAUDE.md's Reliability section), mirrored exactly from the no-throw
-guarantee the function already had.
+The choice trades some power-loss durability for reduced per-transaction synchronisation work. SQLite's [synchronous documentation](https://www.sqlite.org/pragma.html#pragma_synchronous) explains that WAL with NORMAL remains consistent, but recent transactions can roll back after power loss or an operating-system crash. Application crashes have different durability semantics. It is inaccurate to call the change fully durable under every crash scenario.
 
-## Consequences
+## Alternatives and consequences
 
-- Commits are both cheaper and no longer serialize unrelated rooms' writes
-  behind a whole-file exclusive lock.
-- `synchronous = NORMAL` is still fully crash-safe for this app: WAL mode can
-  never corrupt the database on a crash or power loss, it can only lose the
-  last commit(s) that hadn't yet been flushed. For a live listening room (not
-  a ledger), losing a few seconds of the most recent log/activity rows in the
-  event of an actual server crash is an acceptable trade for every normal
-  commit being non-blocking.
-- A file-backed database now has two extra files alongside it (`-wal`,
-  `-shm`) in the same directory; nothing in the Dockerfile/deployment needs to
-  change since both already share that directory with the main file.
+- Keeping WAL with FULL would add a WAL synchronisation at each commit, providing stronger durability at additional write cost. No retained comparison establishes its user-visible cost in this deployment.
+- NORMAL does not make synchronous JavaScript database calls non-blocking. The server still waits for those calls, and the setting is not proof that contention has disappeared.
+- Potential rollback concerns every recent transaction using this configuration, including room, queue, playback and chat state, not only logs. The amount of lost history is not established as a fixed number of seconds.
+- The database's WAL and shared-memory sidecar files live alongside it on the mounted data volume. Persistence checks should use a file-backed database and distinguish an application restart from power loss.
+
+The performance/durability trade-off is recorded explicitly. To claim a numerical improvement, retain a reproducible workload, environment and before/after results. To claim a buffering fix, also measure the relevant playback behaviour under comparable conditions. Neither claim is established by the existing rehearsal.

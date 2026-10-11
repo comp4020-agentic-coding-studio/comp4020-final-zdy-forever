@@ -78,6 +78,51 @@ describe("ProposalManager", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("lets an idle connected listener abstain from Skip without removing them or shortening the vote", () => {
+    vi.useFakeTimers();
+    const present = [alice.accountId, bob.accountId];
+    const manager = new ProposalManager(() => present);
+    const { io, emitted } = fakeIo();
+    try {
+      vi.advanceTimersByTime(310_000);
+      const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "SKIP", { presentCount: 2 });
+      if (!requested.ok) throw new Error(requested.error);
+      vi.advanceTimersByTime(14_999);
+      // Simulate the deadline callback waking one millisecond early.
+      manager.forceResolve(io, db, roomId);
+      expect(manager.getActiveProposal(roomId)?.state).toBe("OPEN");
+      expect(getCurrentPlayback(db, roomId)).not.toBeNull();
+      vi.advanceTimersByTime(1);
+      expect(manager.getActiveProposal(roomId)).toBeNull();
+      expect(getCurrentPlayback(db, roomId)).toBeNull();
+      expect(present).toEqual([alice.accountId, bob.accountId]);
+      expect(emitted.filter((e) => e.event === "proposal:update").at(-1)?.payload).toMatchObject({
+        proposal: { state: "PASSED" }, applied: true,
+      });
+      const updateCount = emitted.length;
+      vi.advanceTimersByTime(15_000);
+      expect(emitted).toHaveLength(updateCount);
+    } finally { manager.dispose(); vi.useRealTimers(); }
+  });
+
+  it("still accepts a late NO and fails a tie while another member abstains", () => {
+    vi.useFakeTimers();
+    const manager = new ProposalManager(() => [alice.accountId, bob.accountId, carol.accountId]);
+    const { io, emitted } = fakeIo();
+    try {
+      const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "SKIP", { presentCount: 3 });
+      if (!requested.ok) throw new Error(requested.error);
+      vi.advanceTimersByTime(14_999);
+      expect(manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "NO").ok).toBe(true);
+      expect(manager.getActiveProposal(roomId)?.state).toBe("OPEN");
+      vi.advanceTimersByTime(1);
+      expect(getCurrentPlayback(db, roomId)).not.toBeNull();
+      expect(emitted.filter((e) => e.event === "proposal:update").at(-1)?.payload).toMatchObject({
+        proposal: { state: "FAILED" }, applied: false,
+      });
+    } finally { manager.dispose(); vi.useRealTimers(); }
+  });
+
   it("passes immediately when both present accounts vote YES and cancels the timer", () => {
     vi.useFakeTimers();
     const manager = new ProposalManager(() => [alice.accountId, bob.accountId]);
@@ -352,8 +397,7 @@ describe("ProposalManager", () => {
     expect(requested.ok).toBe(true);
     if (!requested.ok) return;
 
-    // Alice (proposer) auto-voted YES; Bob provides the second non-abstain
-    // vote needed to clear the minimum-2 threshold.
+    // Alice (proposer) auto-voted YES; Bob also agrees.
     const voted = manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "YES");
     expect(voted.ok).toBe(true);
 
@@ -371,7 +415,7 @@ describe("ProposalManager", () => {
     expect(emitted.some((e) => e.event === "playback:update")).toBe(true);
   });
 
-  it("fails a proposal with only one non-abstain vote (the proposer's own) and leaves playback unchanged", async () => {
+  it("passes a proposal at the deadline when everyone except the proposer abstains", async () => {
     const manager = new ProposalManager();
     const { io, emitted } = fakeIo();
 
@@ -383,15 +427,15 @@ describe("ProposalManager", () => {
     await sleep(60);
 
     const current = getCurrentPlayback(db, roomId);
-    expect(current?.status).toBe("PLAYING");
+    expect(current?.status).toBe("PAUSED");
 
     const resolutions = emitted.filter((e) => e.event === "proposal:update").map((e) => e.payload as ProposalBroadcast);
     const final = resolutions[resolutions.length - 1];
-    expect(final.proposal.state).toBe("FAILED");
-    expect(final.applied).toBe(false);
+    expect(final.proposal.state).toBe("PASSED");
+    expect(final.applied).toBe(true);
   });
 
-  it("fails a tied vote (one YES, one NO) even though the minimum vote count is met", async () => {
+  it("fails a tied vote (one YES, one NO)", async () => {
     const manager = new ProposalManager();
     const { io, emitted } = fakeIo();
 
@@ -456,9 +500,9 @@ describe("ProposalManager", () => {
     const first = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "PAUSE", { votingWindowMs: 20 });
     expect(first.ok).toBe(true);
     await sleep(60);
-    // First proposal failed (only proposer voted), so playback is still PLAYING.
+    // The first proposal passed on the proposer's YES, so request Play next.
 
-    const second = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "PAUSE", { votingWindowMs: 5_000 });
+    const second = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "PLAY", { votingWindowMs: 5_000 });
     expect(second.ok).toBe(true);
   });
 
@@ -1127,8 +1171,9 @@ describe("ProposalManager", () => {
       beforeQueueItemId: b.queueItemId,
     });
     expect(requested.ok).toBe(true);
-    // Only alice (the proposer, auto-YES) ever votes — one non-abstain vote
-    // is short of the minimum 2, so this fails without anyone else voting.
+    if (!requested.ok) throw new Error(requested.error);
+    manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "NO");
+    // One YES and one NO is a tie; Carol abstains.
 
     await sleep(60);
 
@@ -1504,10 +1549,8 @@ describe("ProposalManager touches room activity", () => {
   });
 });
 
-// Regression: a vote needs 2 non-abstain votes, so a room with one person in
-// it could never pass anything — once paused (every server restart pauses a
-// playing room) it stayed paused for good. Now the only person present gets
-// their own proposal through at once (docs/adr/0004).
+// A sole listener still skips the waiting window (docs/adr/0004).
+// ADR 0012 also lets abstentions through at the deadline in larger rooms.
 describe("ProposalManager with a sole listener", () => {
   let dir: string;
   let db: DatabaseSync;

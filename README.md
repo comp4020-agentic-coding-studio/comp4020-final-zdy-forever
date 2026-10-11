@@ -1,78 +1,29 @@
 # Watch YouTube Together
 
-A good shared listening room should make users feel they are watching
-together, not that one person controls everything while everyone else
-follows. So the main design principle is simple: actions that don't affect
-other users happen freely; actions that change what everyone is watching
-require agreement.
+[Open the app](https://comp4020-final-zdy-forever.fly.dev/), choose a display name, then create a room or join with a friend's link or room number. Paste a YouTube link to add a video. Share the room link so friends can join, watch and chat together. No password or YouTube API key is required.
 
-## Where this started
+## What good means here
 
-The idea was inspired by Spotify Jam and QQ Music's "listen together" —
-both let a small group share control of one media session. My original idea
-was music, but without a licensed audio source or a YouTube Data API key,
-"listen together" became "watch together" using YouTube's official
-embeddable player. The core idea stayed the same: one shared session, no
-single user in full control.
+I want a small group of friends to feel together across physical distance. I enjoyed this feeling when using QQ Music's listen-together feature, but in my experience it was available on mobile rather than the desktop and web interfaces I wanted to use. That experience motivated this browser-based project; it is not a claim about QQ Music's current feature availability.
 
-## Shared presence
+A useful comparison, introduced during this documentation revision, is Robin Sloan's [*An app can be a home-cooked meal*](https://www.robinsloan.com/notes/home-cooked-app/). His family messaging app values a particular group's connection over a large audience. My definition of good similarly starts with friends sharing an experience. This app adds a further concern: changing shared playback interrupts other people.
 
-Each room holds at most 12 users (`MAX_ROOM_USERS`, `server/src/rooms.ts`) —
-small, since this is built for groups of friends, not a public audience. The
-server tracks who is present (`server/src/presence.ts`); a refresh or
-reconnect always gets current state from the server rather than trusting
-what the browser remembered.
+## Free contributions, shared interruptions
 
-## Shared control
+Anyone can add videos and chat without permission. Adding to the queue lets each person contribute an idea; Pause or Skip changes what others are experiencing, so playback controls require voting. Play, Pause, Skip, Seek, Remove and Reorder follow this rule. Only the current DJ can propose Seek.
 
-Play, Pause, Skip, Seek, Remove and Reorder affect everyone, so each needs a
-vote: 15 seconds, YES/NO, non-responses as abstain, more than half the valid
-votes required, ties failing. Alone, a proposal passes immediately — nobody
-else it could affect. Each proposal is linked to the room state when it
-opened, so a late result can't change state already moved on. Adding a song,
-joining, leaving and chatting skip the vote, since none of them interrupts
-anyone else's viewing.
+A vote lasts up to 15 seconds. YES and NO count; nonresponses abstain. A strict majority of votes cast passes, ties fail, and one YES with no NO passes at the deadline. A sole listener acts immediately; otherwise early resolution requires everyone present to vote. Abstaining leaves you in the room. The cost is deliberate: silence does not veto another person's request, so someone who objects must respond.
 
-Whoever added the current track is its DJ — tied to the user, not a browser
-tab. If the DJ disconnects, the role passes to another active member so the
-room doesn't get stuck. Rooms close automatically after two hours idle.
+**Verification, 11 October 2026:** the earlier deployment rejected a lone YES when another connected member abstained. After the correction was deployed, an agent-run check kept that member connected but idle for 310 seconds; Skip passed at the end of the 15-second vote. The [verification record](https://github.com/comp4020-agentic-coding-studio/comp4020-final-zdy-forever/blob/main/docs/evidence/2026-10-11/README.md) distinguishes the before and after results.
 
-## Room chat
+## Small rooms with a limited lifetime
 
-Everyone can chat, even with an empty queue — sending a message doesn't
-interrupt anyone's playback, so it needs no vote. Messages are capped at 500
-characters, with each account limited to eight messages per room in ten
-seconds. They're stored in SQLite and survive a refresh or reconnect, but
-last only as long as the room — deleted along with it. Message content is
-never written to the server logs.
+I chose 12 people because larger groups make everyone wait longer for their selection. I chose 15 seconds to keep votes brief. These are design judgements, not values established by a user study.
 
-## Why YouTube
+Rooms close after two hours without meaningful activity. I expect each gathering to use a fresh room, and expiry prevents abandoned rooms accumulating. SQLite preserves open-room state across refreshes and restarts; closure deletes the room's chat. This deliberately limits shared memory and needs review against the course's next-day persistence requirement.
 
-Only YouTube's official oEmbed endpoint and IFrame Player are used — never
-`yt-dlp`, audio extraction, or hidden playback. YouTube's own behaviour
-(buffering, ads, autoplay, network differences) rules out identical
-playback for every user, so the server stores the current video, state,
-position and time, and clients adjust toward that shared state.
+## Boundaries and evaluation
 
-## What I chose not to build
+Videos use YouTube's official visible player and keyless oEmbed metadata. Buffering, autoplay restrictions and network differences mean synchronisation is convergence, not identical playback. Link entry replaces search; I omitted profiles, voice chat and recommendations to keep attention on friends' selections.
 
-- **No search** — no YouTube Data API key, so videos are added by pasting
-  links.
-- **No account system** — built for friends joining a temporary room, not
-  long-term profiles.
-- **No voice chat** — it would compete with the video's audio, and anyone
-  who wants it already has a voice app.
-- **No recommendations** — the point of the room is sharing with each
-  other, not an algorithm doing it for you.
-
-## What I can prove and what I cannot
-
-The room cap, voting rules, proposal checks and DJ handoff are enforced by
-code and tests. Whether 12 is the right number, or 15 seconds feels
-comfortable, isn't something tests can show — that's a judgement about
-experience, not correctness.
-
-So far I've only tested this myself across multiple browser tabs: enough to
-prove the rules work technically, not that real groups will enjoy it. The
-goal for now is clear shared-control rules in an app simple enough for a
-small group to actually use together.
+Tests check capacity, voting, stale actions and shared state. My own browser tests exposed voting and interface problems; a later agent-assisted rehearsal captured server events. Neither establishes that unfamiliar groups enjoy the experience. That requires people trying the room, including the still-pending Crit 10 peer exercise. Whether the room feels welcoming and the vote window feels fair remains a human judgement.

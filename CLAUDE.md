@@ -2,11 +2,20 @@
 
 ## Goal
 
-Watch YouTube Together is a persistent, real-time shared listening room for up to 12 users.
+Watch YouTube Together is a real-time shared viewing room for up to 12 users.
+Open-room state is persistent; rooms close after two hours of inactivity and
+closure deletes their chat. Do not describe this as unlimited shared memory.
 
 Product principle:
 
-> A good shared listening room should feel like people are listening together, with shared presence, shared control, and shared memory.
+> Friends can freely contribute videos and chat; changes that interrupt the
+> shared viewing experience require a vote. Nonresponse is abstention, not consent.
+
+The owner chose 12 members to limit waiting for each person's selection,
+15-second votes to reduce waiting, and two-hour expiry for one-off gatherings.
+These are product judgements, not experimentally optimised values. Check their
+consequences against the course brief, including next-day persistence; do not
+claim that a rationale alone establishes compliance.
 
 Do not add unrelated features or over-engineer.
 
@@ -170,16 +179,16 @@ Voting rules:
 
 - 15-second window
 - Resolve immediately once every currently present account has voted, whether
-  YES or NO; otherwise wait for the deadline. Keep majority, quorum and stale
+  YES or NO; otherwise wait for the deadline. Keep majority and stale
   reference checks, and cancel the timer after early resolution.
 - YES / NO
-- no response = ABSTAIN
+- no response within 15 seconds = ABSTAIN; do not disconnect or remove that member
 - ABSTAIN excluded from denominator
-- minimum 2 non-abstain votes, capped at how many accounts are actually present right now (never more votes required than could possibly be cast) — see `docs/adr/0010-live-presence-quorum.md`
+- no minimum turnout: at the deadline, decide by a strict majority of YES/NO votes cast; one YES with no NO passes, zero votes or a tie fails — see `docs/adr/0012-abstention-does-not-block-votes.md`
 - required YES = floor(validVotes / 2) + 1
 - tie fails
 
-Exception: when the proposer is the only person in the room, there is nobody to vote with, so their proposal passes immediately (all other rules, e.g. DJ-only Seek, still apply). See `docs/adr/0004-sole-listener-proposals-pass.md`. The same quorum-tracks-presence logic also resolves a vote early if the room degrades to one listener while it's still open, not only at request time.
+Exception: when the proposer is the only person in the room, there is nobody to vote with, so their proposal passes immediately (all other rules, e.g. DJ-only Seek, still apply). See `docs/adr/0004-sole-listener-proposals-pass.md`. If everyone still present has voted after a departure, resolve early; otherwise wait until the deadline.
 
 One account gets one vote, and may change it between YES and NO any number of times before the proposal resolves. The proposer may also cancel their own open proposal before it resolves; nobody else may cancel it for them.
 
@@ -308,6 +317,17 @@ After changes:
 - report remaining risks
 
 Do not claim something works without verifying it.
+
+Describe acceptance scenarios in observable terms before reporting a fix.
+Distinguish connection state from participation: a still-connected viewer who
+does not vote must be tested separately from a departed viewer. Agents may
+implement and execute checks; report their scope and remaining uncertainty.
+
+In documentation, distinguish owner-reported experience, agent-executed checks,
+agent-reported hypotheses and measured results. A successful build or changed
+configuration does not establish a performance improvement or root cause.
+Do not invent peer discussion, personal literature reading or completed crit
+activities. Label later rehearsals and local versus deployed verification.
 
 Preserve meaningful commits and real iteration for `PROCESS.md`. Never invent failures or evidence.
 

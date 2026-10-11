@@ -294,9 +294,7 @@ export class ProposalManager {
     });
 
     // The proposer implicitly votes YES for the action they just requested —
-    // otherwise the person who wanted this would, oddly, have to separately
-    // vote for their own proposal to have any chance of the minimum 2
-    // non-abstain votes being met.
+    // they do not need to vote again to express that intention.
     const proposerVote = engineCastVote(proposal, proposerAccountId, "YES", nowMs);
     if (proposerVote.ok) proposal = proposerVote.proposal;
 
@@ -305,12 +303,8 @@ export class ProposalManager {
     // first: if it throws, no proposal has been opened, broadcast or timed.
     touchRoomActivity(db, roomId, nowMs);
 
-    // A sole listener's proposal passes at once (docs/adr/0004): with
-    // nobody else in the room, no vote could ever reach the 2 non-abstain
-    // votes it needs, so a room left with one person — after a server
-    // restart paused it, say — could never be played, skipped or reordered
-    // again. Everything checked before this point still holds (DJ-only Seek,
-    // no-op reorders, ...), and it's applied exactly like a vote that passed.
+    // A sole listener has nobody else to wait for. All permission and stale
+    // reference checks still apply, exactly as for a vote at its deadline.
     if (options.presentCount === 1) {
       logAction(
         db,
@@ -420,16 +414,8 @@ export class ProposalManager {
     this.tryResolveIfEveryoneVoted(io, db, roomId, proposal);
   }
 
-  // Shared by castVote and reconcilePresence: once every currently-present
-  // account has cast a YES/NO ballot, resolve right away instead of waiting
-  // out the rest of the 15-second window (docs/adr/0009). Counts actual
-  // account identities from live server presence, not a client-claimed count
-  // or the number of ballots — departed voters cannot stand in for people who
-  // have not voted. `presentCount` also caps the minimum-votes requirement
-  // itself (shared/src/voting.ts's tallyVotes), so a room that has genuinely
-  // shrunk to one listener can still resolve on that one ballot rather than
-  // deadlock forever on "at least 2 valid votes" (docs/adr/0010). Returns the
-  // resolved proposal if it just settled, else null (still open).
+  // Resolve early only once everyone still present has voted. Otherwise they
+  // retain the full window to respond; only at the deadline do they abstain.
   private tryResolveIfEveryoneVoted(io: Server, db: DatabaseSync, roomId: string, proposal: Proposal): Proposal | null {
     const present = this.presentAccounts?.(roomId);
     if (!present?.length || !present.every((id) => proposal.votes[id] === "YES" || proposal.votes[id] === "NO")) {
@@ -441,7 +427,7 @@ export class ProposalManager {
     this.timers.delete(roomId);
     this.active.delete(roomId);
 
-    const resolved: Proposal = { ...proposal, state: tallyVotes(proposal.votes, present.length).passed ? "PASSED" : "FAILED" };
+    const resolved: Proposal = { ...proposal, state: tallyVotes(proposal.votes).passed ? "PASSED" : "FAILED" };
     if (resolved.state === "PASSED") {
       this.applyPassed(io, db, roomId, resolved);
     } else {
@@ -582,14 +568,20 @@ export class ProposalManager {
 
     const proposal = this.active.get(roomId);
     if (!proposal) return;
+    const nowMs = Date.now();
+    const remainingMs = proposal.expiresAt - nowMs;
+    if (remainingMs > 0) {
+      // A timer can wake just before the wall-clock deadline. Keep the
+      // proposal open and retry; never discard it as a failed OPEN vote.
+      const retry = setTimeout(() => this.resolveRoom(io, db, roomId), remainingMs);
+      retry.unref?.();
+      this.timers.set(roomId, retry);
+      return;
+    }
     this.active.delete(roomId);
 
-    // presentCount caps the minimum-votes requirement itself (see tallyVotes
-    // in shared/src/voting.ts and docs/adr/0010), so a room that genuinely
-    // shrank to one listener during the vote doesn't deadlock here waiting
-    // forever for a second valid vote nobody is left to cast.
-    const presentCount = this.presentAccounts?.(roomId).length;
-    const resolved = resolveProposal(proposal, Date.now(), presentCount);
+    // Nonresponders abstain at the deadline even if they are still connected.
+    const resolved = resolveProposal(proposal, nowMs);
 
     if (!canExecute(resolved)) {
       logAction(db, {

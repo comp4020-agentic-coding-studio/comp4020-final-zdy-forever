@@ -1,0 +1,8 @@
+
+ RUN  v5.0.1 <checkout>
+
+
+ Test Files  1 passed (1)
+      Tests  3 passed (3)
+   Start at  18:43:22
+   Duration  16.45s (tests 100%)

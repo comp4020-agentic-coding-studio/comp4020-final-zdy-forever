@@ -1,67 +1,47 @@
 # Process overview
 
-Watch YouTube Together is a shared room where users can watch YouTube videos together. The main rule is simple: actions that do not interrupt other users, such as chatting or adding a song, can happen directly. Actions that change what everyone is currently watching, such as Play, Pause, Skip, Seek, Remove or Reorder, require a vote.
+## My role and workflow
 
-This section explains how the current application implements those rules and how some of the design decisions changed during development.
+I used Claude Code to build an initial complete system from my requirements, then changed it incrementally. I supplied product proposals, described failures and accepted or rejected suggestions; the agent generated the implementation. The stack was suggested by the agent and accepted by me. I did not independently benchmark competing frameworks before choosing it. Rules in [CLAUDE.md](CLAUDE.md) came from both my instructions and agent additions.
 
-## Stack and architecture
+My workflow was to explain an intended experience, try the result, report a mismatch and ask for a correction. I personally tested the room limit, seeking, refresh/reconnection and phone/desktop layouts. These experiences are my retrospective account, not preserved recordings of every session. The [evidence register](docs/evidence/author-account.md) separates that account from commits, captured observations and agent reports. Crit presentations were opportunities to show the work; I am not attributing my discoveries to peer discussion.
 
-The client uses React, TypeScript and Vite. The server uses Node, Express and Socket.IO, with SQLite as the database. YouTube videos are played through the official IFrame Player, while oEmbed is used to retrieve basic video information.
+## Product decisions and their costs
 
-The application is intentionally kept as one deployable system rather than splitting the frontend, backend and database into separate services. The course deployment environment provides one `shared-cpu-1x` machine, 256 MB of memory and one volume, so a simple architecture is more suitable for the scale of this project. Using a separate frontend deployment or managed PostgreSQL database would add more deployment and configuration work without providing much benefit here ([`f32f4df`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-zdy-forever/commit/f32f4df)).
+QQ Music's listen-together experience made me want to share media with distant friends through a browser. My governing rule is that adding a video expresses a preference without interrupting the current selection, while Pause or Skip affects everyone. I therefore allow adding and chatting freely but require votes for shared playback changes.
 
-YouTube also affects the design. Because there is no YouTube Data API key, the application does not provide search and users add videos by pasting links. The application also does not extract audio, so perfectly identical playback between different users is unrealistic. Instead, the server stores the current video, playback status, position, server time and revision. Clients use this information to stay close to the shared playback state.
+I chose 12 users because a larger queue means a longer wait for each person's selection, 15-second votes to reduce waiting, and two-hour idle closure because gatherings are temporary and abandoned rooms should not accumulate. These values express my judgement rather than measured optima. Closure also removes chat, so persistence is limited to open rooms. This remains a tension with the course's expectation of meaningful next-day persistence; documentation cannot resolve that product decision.
 
-## Keeping one shared room state
+Sloan's small-group software essay was introduced during this revision to help articulate the design, not retroactively presented as my original inspiration. The source and comparison appear in [README.md](README.md).
 
-For a multi-user application, the browsers should not independently decide the final room state. Otherwise, different users could end up seeing different queues or playback states.
+## Why this architecture fits
 
-Because of this, the server is responsible for the room membership, queue and current playback state. Clients only send requests such as "add this song" or "vote yes", and the server decides what the final result should be.
+The accepted stack is React, TypeScript and Vite, with Node, Express, Socket.IO and SQLite. Shared types connect client and server. The foundation is visible in [`f32f4df`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-zdy-forever/commit/f32f4df). One deployable application and a local database fit the course's single machine and persistent volume. A separate database service would add operational work outside that setup. This explains the fit; it does not establish that this stack outperforms alternatives.
 
-The early implementation added persistent rooms and user identities ([`f32f4df`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-zdy-forever/commit/f32f4df), [`434291e`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-zdy-forever/commit/434291e)). The queue was also designed so that two users adding songs at the same time would not overwrite each other's changes ([`873a4c7`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-zdy-forever/commit/873a4c7)).
+The server owns shared state: browsers request actions rather than replace the queue. Persistent identities and rooms were added in [`434291e`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-zdy-forever/commit/434291e), and concurrent additions were addressed in [`873a4c7`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-zdy-forever/commit/873a4c7). Separating voting rules from transport made them directly testable ([`4cb0237`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-zdy-forever/commit/4cb0237)).
 
-The voting logic for Play, Pause, Skip and Seek was implemented separately from the UI and server so that its rules could be unit-tested directly ([`4cb0237`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-zdy-forever/commit/4cb0237)).
+Without a YouTube Data API key, I accepted pasted links and official oEmbed metadata instead of search ([`e866195`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-zdy-forever/commit/e866195)). The visible IFrame Player keeps playback within YouTube's supported interface. It also leaves buffering and autoplay outside my control, so shared state can coordinate playback without guaranteeing identical viewing.
 
-Adding a song and sending a chat message do not require a vote. Play, Pause, Skip, Seek, Remove and Reorder do.
+## A correction that did not initially solve my problem
 
-This behaviour is also checked by `spec/brief.test.ts` against the running application. For example, adding a track should not create a vote, while trying to pause a room with two users should create a proposal instead of pausing immediately.
+I discovered the voting issue myself using two pages: one remained connected but inactive for roughly five minutes; the other requested Skip. Requiring two ballots blocked the participating person. I asked the agent to account for people temporarily away from their computers. After a retry appeared normal, I believed the issue was fixed.
 
-## Handling users joining and leaving
+The earlier change reconciled votes with live presence ([`d711fc6`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-zdy-forever/commit/d711fc6)); heartbeat settings were also tightened later. However, disconnection and nonparticipation are different. A connected viewer can ignore a vote without leaving. My retest had not established that this exact case worked.
 
-Real-time updates are sent through Socket.IO, and users normally see room changes without reloading the page. However, the more difficult problem was deciding what should happen when users disconnect or when the number of active participants changes.
+On 11 October, a Codex-assisted rehearsal reproduced it on the deployment: participant B stayed connected, made no inputs for 309.512 seconds, and participant A's Skip failed after 15.002 seconds. The [event record and screenshots](docs/evidence/2026-10-11/README.md) support this narrower finding. They do not identify the deployment's exact source revision.
 
-The current track has a DJ, which is the user who added it. The DJ is treated as a user role rather than a particular browser connection. If that user disconnects, the role can be handed to another active user instead of leaving the room stuck ([`b2e230d`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-zdy-forever/commit/b2e230d)).
+I authorised the revised rule in [ADR 0012](docs/adr/0012-abstention-does-not-block-votes.md): at the deadline, nonresponses abstain and only YES/NO ballots determine the majority. One YES can pass while another member remains connected. The cost is that silent viewers cannot veto a change. Removing idle viewers would also disturb membership and DJ roles, so abstention is a more targeted interpretation of my intention.
 
-A similar problem appeared in voting. The original rule required at least two valid votes. This could fail when another user's connection had already disappeared but the server had not detected it yet. The remaining user could not reach two votes even though nobody else was actually available to participate.
+The correction updates CLAUDE.md and regression tests, including simulated five-minute inactivity and a real two-socket vote lasting the full window. The full local check passed 410 tests across 26 files; the three application-level brief tests were rerun after a test-ordering adjustment. These are agent-executed checks, recorded in the evidence bundle. After deployment, another two-connection check kept the abstainer connected and idle for 310 seconds; Skip passed at the deadline and both accounts received the same result. This tests the server rule, not the visible player or a human peer session.
 
-The decision is documented in `docs/adr/0010-live-presence-quorum.md`. The required quorum now depends on the number of users who are actually present, and an active vote is checked again when presence changes instead of only when another vote is submitted ([`d711fc6`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-zdy-forever/commit/d711fc6)).
+## Observability and evidence limits
 
-One alternative was simply to reduce the Socket.IO heartbeat timeout so disconnected users would disappear more quickly. However, this would only make the problem last for a shorter time rather than fixing the voting rule itself, so I chose to change the rule.
+Structured logging records actions and actors ([`3f1eab5`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-zdy-forever/commit/3f1eab5)); a room log view and rejected-addition records followed ([`6c62f8d`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-zdy-forever/commit/6c62f8d)). During my own deployed testing, one person's video sometimes buffered even with only two users. I asked the agent to inspect logs and it reported a fix.
 
-## Logging and performance
+The SQLite WAL and logging changes are recorded in [`3863e71`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-zdy-forever/commit/3863e71). The earlier “17 times faster” number came from the agent; I did not run or interpret that benchmark. Without retained measurements or a controlled playback comparison, it cannot prove why buffering occurred. [ADR 0011](docs/adr/0011-sqlite-wal-mode.md) now distinguishes the implemented change, possible mechanism and unverified performance claim.
 
-The server records structured logs for important actions, including who performed an action, what happened and which room it happened in. I also added a room-specific log view so that system behaviour can be inspected during a demo ([`3f1eab5`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-zdy-forever/commit/3f1eab5), [`6c62f8d`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-zdy-forever/commit/6c62f8d)).
+## Making judgement repeatable
 
-Later, playback was reported to become less smooth when more users were active. The logs helped identify that the database was contributing to the problem.
+My self-tests also exposed seeking beyond a video's duration and a tilted decoration becoming confusing when reused as a button. The corresponding interface changes are visible in [`d7ab422`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-zdy-forever/commit/d7ab422); the commit corroborates the correction, not every detail of my testing session.
 
-Actions such as voting, chatting and joining a room all write data to SQLite. `node:sqlite` performs these writes synchronously, so database operations can temporarily block the same Node.js event loop that is also responsible for sending real-time Socket.IO messages.
-
-The original SQLite configuration made these writes more expensive than necessary. `docs/adr/0011-sqlite-wal-mode.md` records the changes: enabling WAL mode, using `synchronous = NORMAL`, and combining related log operations into one transaction.
-
-A small benchmark showed that these changes made each commit around 17 times faster on the local test machine ([`3863e71`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-zdy-forever/commit/3863e71)).
-
-This was useful because logging was originally added mainly to make the application easier to inspect, but it later became evidence that helped identify a performance problem.
-
-## Directing, checking and correcting agent work
-
-My general workflow with coding agents was not to accept a change simply because the generated code looked correct. I tried to run the application and compare its actual behaviour with the brief.
-
-For example, I filled a room with 12 users and then tried to join as the 13th user. This checked not only whether the limit existed in the code, but also whether the rejected user received a clear error instead of nothing happening.
-
-I also tested seeking beyond the actual length of a video. This revealed that the stored duration was often unavailable, so the live YouTube player's `getDuration()` value was a more reliable source.
-
-UI problems were also easier to notice by looking at the running application rather than only reading the code. For example, a rotation effect that originally made an emoji look like a sticker became visually confusing after the same element was changed into a button.
-
-When I found a problem that could happen again, I tried not to fix only that individual case. Important rules were added to `CLAUDE.md` or to tests in `spec/` so that later agent changes could be checked against them.
-
-The voting quorum issue is one example. It started as a problem with a stuck vote, but the final fix included the code change, an updated rule in `CLAUDE.md`, and a test that checks the behaviour. This makes the correction part of the project rules rather than a one-time patch.
+I still want to lead agent work without manually inspecting every function. The voting case changes what I ask for at acceptance: a concrete scenario, observable result and regression check. [spec/README.md](spec/README.md) maps promises to checks and remaining human judgements. The Crit 10 rehearsal is useful preparation, but two classmates' independent use and my log-only narration are still outstanding. Passing automation and an agent's completion report answer different questions from that exercise.
