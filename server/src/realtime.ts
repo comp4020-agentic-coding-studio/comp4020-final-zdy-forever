@@ -1,12 +1,21 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { Server, Socket } from "socket.io";
-import { CHAT_MAX_LENGTH, type ChatSendResult, type RoomJoinPayload, type RoomSnapshot } from "../../shared/src/types.ts";
+import {
+  CHAT_MAX_LENGTH,
+  PING_SIGNALS,
+  type ChatSendResult,
+  type PingBroadcast,
+  type PingSignal,
+  type RoomJoinPayload,
+  type RoomSnapshot,
+} from "../../shared/src/types.ts";
 import type { VoteChoice } from "../../shared/src/voting.ts";
 import { getAccountByClientId } from "./accounts.ts";
 import { logAction } from "./logging.ts";
 import { getCurrentPlayback } from "./playback.ts";
 import { PresenceStore } from "./presence.ts";
 import { DjHandoffManager } from "./djHandoff.ts";
+import { PingRateLimiter } from "./pingRateLimit.ts";
 import { ProposalManager } from "./proposals.ts";
 import { listQueue } from "./queue.ts";
 import { ChatRateLimiter, listChatMessages, normalizeChatText, recordChatMessage } from "./chat.ts";
@@ -82,6 +91,7 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
   const presence = new PresenceStore();
   const proposals = new ProposalManager((roomId) => presence.list(roomId).map((person) => person.accountId));
   const chatLimiter = new ChatRateLimiter();
+  const pingLimiter = new PingRateLimiter();
   const handoffs = new DjHandoffManager(db, presence, (roomId, playback) => io.to(roomId).emit("playback:update", playback));
   const handoffSweep = setInterval(guarded("DJ presence check", null, () => {
     for (const roomId of presence.roomIds()) handoffs.reconcile(roomId);
@@ -156,6 +166,7 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
     proposals.closeRoom(io, roomId);
     handoffs.clear(roomId);
     chatLimiter.clearRoom(roomId);
+    pingLimiter.clearRoom(roomId);
     io.to(roomId).emit("room:closed", { roomId });
     for (const socketId of presence.socketIdsIn(roomId)) {
       const socket = io.sockets.sockets.get(socketId);
@@ -419,6 +430,48 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
         reply({ ok: true });
       })(payload);
     });
+
+    // Broadcasts a ping-wheel signal to everyone currently present — never
+    // persisted, never logged (not one of logging.ts's 15 LOG_ACTIONS; this
+    // is cosmetic, not an auditable state change), and never meaningful
+    // activity (no touchRoomActivity call — CLAUDE.md's activity list is
+    // exhaustive and a cosmetic ping isn't on it, same reasoning as why
+    // heartbeats don't count). See docs/adr/0013 for why this is not a
+    // reopening of docs/adr/0006's removal of reactions.
+    socket.on("ping:send", guarded("ping:send", reportTo("ping:sendError"), (payload: { signal?: unknown; xRatio?: unknown; yRatio?: unknown }) => {
+      if (!data.roomId) {
+        socket.emit("ping:sendError", { error: "join a room before sending a signal" });
+        return;
+      }
+      if (evictIfClosed(data.roomId)) {
+        socket.emit("ping:sendError", { error: ROOM_CLOSED_MESSAGE });
+        return;
+      }
+      const signal = payload?.signal;
+      if (typeof signal !== "string" || !(PING_SIGNALS as readonly string[]).includes(signal)) {
+        socket.emit("ping:sendError", { error: "unsupported signal" });
+        return;
+      }
+      // Viewport-relative position (0..1) the ping wheel was opened at —
+      // never trusted beyond that range, clamped rather than rejected since
+      // an out-of-range value only ever means it should show up at an edge.
+      const clampRatio = (value: unknown) => Math.min(1, Math.max(0, typeof value === "number" && Number.isFinite(value) ? value : 0.5));
+      const xRatio = clampRatio(payload?.xRatio);
+      const yRatio = clampRatio(payload?.yRatio);
+      if (!pingLimiter.tryConsume(data.roomId, data.accountId, Date.now())) {
+        socket.emit("ping:sendError", { error: "slow down — too many signals" });
+        return;
+      }
+      const broadcast: PingBroadcast = {
+        accountId: data.accountId,
+        displayName: data.displayName,
+        signal: signal as PingSignal,
+        xRatio,
+        yRatio,
+        sentAt: new Date().toISOString(),
+      };
+      io.to(data.roomId).emit("ping:new", broadcast);
+    }));
 
     socket.on("disconnect", guarded("disconnect", null, () => {
       // A participant disconnecting mid-vote is not special-cased: they

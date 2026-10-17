@@ -3,10 +3,14 @@ import {
   type Account,
   type JoinRoomResult,
   type LobbyRoom,
+  type LogEventView,
   type QueueItem,
   type Room,
 } from "../../shared/src/types.ts";
 import { placementAllowed } from "../../shared/src/queueRules.ts";
+import { fireConfettiAt } from "./clickConfetti.ts";
+import { LogViewer } from "./LogViewer.tsx";
+import { PingWheel, PING_META } from "./PingWheel.tsx";
 import { RoomChat } from "./RoomChat.tsx";
 import { RoomMembersPopover } from "./RoomMembersPopover.tsx";
 import { SeekControl } from "./SeekControl.tsx";
@@ -74,6 +78,32 @@ function App() {
   // server's queue:reordered broadcast (see usePlaybackSync); dragQueueItemId
   // just tracks which row's drag is in progress so onDrop knows what to move.
   const [dragQueueItemId, setDragQueueItemId] = useState<string | null>(null);
+
+  // A small confetti burst at the cursor on every left-click, site-wide —
+  // purely cosmetic, purely client-local (client/src/clickConfetti.ts never
+  // touches the network). Bubble-phase, not capture: this never needs to
+  // pre-empt anything a click would otherwise do.
+  useEffect(() => {
+    const onClick = (event: MouseEvent) => {
+      if (event.button === 0) fireConfettiAt(event.clientX, event.clientY);
+    };
+    document.addEventListener("click", onClick);
+    return () => document.removeEventListener("click", onClick);
+  }, []);
+
+  // The landing page's "View activity log" button/dialog — resolves a room
+  // by its code/number (GET /api/rooms/logs) without ever joining it.
+  const logDialogRef = useRef<HTMLDialogElement>(null);
+  const [logDialogOpen, setLogDialogOpen] = useState(false);
+  const [logCodeInput, setLogCodeInput] = useState("");
+  const [logEvents, setLogEvents] = useState<LogEventView[] | "error" | null>(null);
+  const [logLoading, setLogLoading] = useState(false);
+  useEffect(() => {
+    const dialog = logDialogRef.current;
+    if (!dialog) return;
+    if (logDialogOpen) dialog.showModal();
+    else dialog.close();
+  }, [logDialogOpen]);
 
   const accountId = account && account !== "error" ? account.accountId : null;
   const live = usePlaybackSync(liveRoomId, accountId, getClientId(), playerRef);
@@ -245,6 +275,17 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liveRoomId, live.joinError, live.leftRoom]);
 
+  // A rejected ping (most often the server's rate limit) is a transient
+  // event, not a standing error — unlike chatError/proposalError (which
+  // clear themselves on the next successful send/vote), nothing else would
+  // ever clear this, so it self-dismisses after a few seconds like every
+  // other toast in this app.
+  useEffect(() => {
+    if (!live.pingError) return;
+    const timer = setTimeout(live.dismissPingError, 3_000);
+    return () => clearTimeout(timer);
+  }, [live.pingError, live.dismissPingError]);
+
   const createRoom = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!accountId) return;
@@ -286,6 +327,35 @@ function App() {
   const joinByCode = async (e: React.FormEvent) => {
     e.preventDefault();
     await joinByCodeValue(codeInput);
+  };
+
+  // Looks a room's activity log up by its code/number, before ever joining
+  // it (GET /api/rooms/logs — server/src/index.ts). Requires a registered
+  // account (the same accountId/clientId pairing every other call here
+  // uses) but never membership/presence in that room.
+  const fetchRoomLogs = async (code: string) => {
+    if (!accountId) return;
+    setLogLoading(true);
+    try {
+      const params = new URLSearchParams({ accountId, clientId: getClientId(), code });
+      const res = await fetch(`/api/rooms/logs?${params}`);
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        setRoomActionError(typeof data?.error === "string" ? data.error : `request failed (${res.status})`);
+        setLogEvents("error");
+        return;
+      }
+      setLogEvents((await res.json()) as LogEventView[]);
+    } catch {
+      setLogEvents("error");
+    } finally {
+      setLogLoading(false);
+    }
+  };
+
+  const submitLogLookup = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await fetchRoomLogs(logCodeInput);
   };
 
   const handleShare = async () => {
@@ -465,6 +535,18 @@ function App() {
           />
           <button type="submit" className="btn btn--purple" disabled={!accountId}>
             🔑 Join
+          </button>
+          <button
+            type="button"
+            className="btn btn--sm"
+            disabled={!accountId}
+            onClick={() => {
+              setLogCodeInput(codeInput);
+              setLogEvents(null);
+              setLogDialogOpen(true);
+            }}
+          >
+            📋 View activity log
           </button>
         </form>
         <div className="lobby-heading">
@@ -802,6 +884,20 @@ function App() {
 
   return (
     <main className={`app-shell${inRoom ? " app-shell--room" : ""}`}>
+      {/* Disarmed while the DJ-handoff dialog is up (the only modal that can
+          appear while inRoom) — a native <dialog> doesn't stop document-level
+          keydown/keyup from firing, so without this the wheel could open
+          "behind" it and a stray release could still spend a real
+          rate-limit token on an interaction the user never intended. */}
+      <PingWheel active={inRoom && !live.djHandoff} onSendSignal={live.sendPingSignal} />
+      {live.incomingPings.map((ping) => (
+        <PingPop key={ping.id} ping={ping} onDismiss={() => live.dismissPing(ping.id)} />
+      ))}
+      {/* A rejected ping (most often the server's real 3-per-10s rate limit
+          — see docs/adr/0013) used to vanish silently: the client's own
+          local cooldown hint (PingWheel.tsx) never blocks a send, so this is
+          the only place a user actually learns a signal didn't go through. */}
+      {live.pingError && <p role="alert" className="ping-error-toast">{live.pingError}</p>}
       {live.djHandoff && (
         <DjHandoffDialog key={live.djHandoff.requestId} handoff={live.djHandoff}
           members={live.presence.filter((person) => person.accountId !== accountId)}
@@ -828,7 +924,57 @@ function App() {
       ) : (
         lobbyRegion
       )}
+      <dialog ref={logDialogRef} className="card log-viewer-dialog" aria-labelledby="log-viewer-title"
+        onClose={() => setLogDialogOpen(false)}>
+        <h2 id="log-viewer-title">📋 Room activity log</h2>
+        <form className="form--stack" onSubmit={submitLogLookup}>
+          <input
+            value={logCodeInput}
+            onChange={(e) => setLogCodeInput(e.target.value.replace(/\D/g, ""))}
+            aria-label="room code or number"
+            inputMode="numeric"
+            pattern="\d{6}|\d{7}"
+            maxLength={7}
+            placeholder="6-digit code or 7-digit number"
+            required
+          />
+          <button type="submit" className="btn btn--purple" disabled={logLoading}>
+            🔍 Look up
+          </button>
+        </form>
+        {logEvents !== null && (
+          <LogViewer events={logEvents} loading={logLoading} onRefresh={() => void fetchRoomLogs(logCodeInput)} />
+        )}
+        <button type="button" className="btn btn--sm" onClick={() => setLogDialogOpen(false)}>
+          Close
+        </button>
+      </dialog>
     </main>
+  );
+}
+
+// Pops up exactly where the sender's ping wheel was opened (xRatio/yRatio —
+// a fraction of their own viewport, so this lands at the same relative spot
+// regardless of either side's window size), holds briefly, then disappears —
+// one ping at a time at its own point, never stacked in a corner.
+function PingPop({ ping, onDismiss }: { ping: { displayName: string; signal: string; xRatio: number; yRatio: number }; onDismiss: () => void }) {
+  useEffect(() => {
+    const timer = setTimeout(onDismiss, 1_800);
+    return () => clearTimeout(timer);
+    // onDismiss is stable for the lifetime of this one ping (it closes over
+    // a fixed id — see usePlaybackSync.ts's dismissPing).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <div
+      className="ping-pop"
+      style={{ left: `${ping.xRatio * 100}%`, top: `${ping.yRatio * 100}%` }}
+      aria-hidden="true"
+    >
+      <span className="ping-pop-icon">{PING_META[ping.signal as keyof typeof PING_META].icon}</span>
+      <span className="ping-pop-name">{ping.displayName}</span>
+    </div>
   );
 }
 

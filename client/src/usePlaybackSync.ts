@@ -4,6 +4,8 @@ import { classifyDrift, computeExpectedPositionMs, isPlausibleTrackEnd } from ".
 import type {
   PlaybackState,
   PresenceEntry,
+  PingBroadcast,
+  PingSignal,
   QueueItem,
   ChatMessage,
   ChatSendResult,
@@ -13,6 +15,7 @@ import type {
 } from "../../shared/src/types.ts";
 import type { Proposal, ProposalBroadcast, VoteChoice } from "../../shared/src/voting.ts";
 import { applyProposalUpdate, proposalViewFromSnapshot } from "./proposalView.ts";
+import { playPingChime } from "./pingChime.ts";
 import { playVoteChime } from "./voteChime.ts";
 import { YT_PLAYER_STATE, type YoutubePlayerHandle } from "./YoutubePlayer.tsx";
 
@@ -47,6 +50,13 @@ export interface RoomLiveState {
   proposalError: string | null;
   chatMessages: ChatMessage[];
   chatError: string | null;
+  // Ping-wheel signals received from anyone in the room (including this
+  // account's own sends) — a short rolling buffer for a toast overlay to
+  // render and auto-dismiss, never persisted and never replayed on
+  // reconnect/late-join (room:snapshot carries none — see docs/adr/0013).
+  // `id` is generated client-side purely for the React key/dismiss timer.
+  incomingPings: (PingBroadcast & { id: string })[];
+  pingError: string | null;
   djHandoff: DjHandoff | null;
   leaveError: string | null;
   leftRoom: boolean;
@@ -64,10 +74,17 @@ const EMPTY_STATE: RoomLiveState = {
   proposalError: null,
   chatMessages: [],
   chatError: null,
+  incomingPings: [],
+  pingError: null,
   djHandoff: null,
   leaveError: null,
   leftRoom: false,
 };
+
+// How many recent pings to keep around for the toast overlay to render —
+// older ones are simply dropped rather than growing unbounded; the overlay
+// itself auto-dismisses each one individually well before this fills up.
+const MAX_INCOMING_PINGS = 20;
 
 // Establishes the client's socket connection, joins (and rejoins on every
 // reconnect) the given room, and keeps the local YouTube player converged
@@ -202,7 +219,7 @@ export function usePlaybackSync(
     });
 
     socket.on("disconnect", () => {
-      setState((s) => ({ ...s, connected: false, chatMessages: [], chatError: null, djHandoff: null }));
+      setState((s) => ({ ...s, connected: false, chatMessages: [], chatError: null, incomingPings: [], pingError: null, djHandoff: null }));
     });
 
     socket.on("room:joinError", ({ error }: { error: string }) => {
@@ -234,6 +251,10 @@ export function usePlaybackSync(
         proposalError: null,
         chatMessages: snapshot.chatMessages,
         chatError: null,
+        // Never seeded from the snapshot — pings are never replayed to a
+        // late joiner or a reconnecting client (docs/adr/0013).
+        incomingPings: [],
+        pingError: null,
         djHandoff: null,
         leaveError: null,
         leftRoom: false,
@@ -322,6 +343,23 @@ export function usePlaybackSync(
         if (!s.connected || message.roomId !== s.room?.roomId || s.chatMessages.some((m) => m.messageId === message.messageId)) return s;
         return { ...s, chatMessages: [...s.chatMessages, message] };
       });
+    });
+
+    // A ping-wheel signal from anyone currently in the room (including this
+    // account's own send, echoed back the same as everyone else's — the
+    // server is the single source of truth for who gets to see it). Never
+    // deduplicated by content: two identical signals from the same account a
+    // moment apart are two separate pings, not one.
+    socket.on("ping:new", (ping: PingBroadcast) => {
+      playPingChime();
+      setState((s) => ({
+        ...s,
+        incomingPings: [...s.incomingPings, { ...ping, id: crypto.randomUUID() }].slice(-MAX_INCOMING_PINGS),
+      }));
+    });
+
+    socket.on("ping:sendError", ({ error }: { error: string }) => {
+      setState((s) => ({ ...s, pingError: error }));
     });
 
     return () => {
@@ -436,6 +474,27 @@ export function usePlaybackSync(
         }
       });
     });
+  }, []);
+
+  // Requests a ping-wheel broadcast at a viewport-relative position (0..1,
+  // see PingWheel.tsx) — never mutates incomingPings itself; the server's own
+  // ping:new echoes it straight back, exactly like every other account's
+  // signal, so there is only ever one code path that adds a ping to the list.
+  const sendPingSignal = useCallback((signal: PingSignal, xRatio: number, yRatio: number) => {
+    socketRef.current?.emit("ping:send", { signal, xRatio, yRatio });
+  }, []);
+
+  // Drops one ping from the toast buffer once its own auto-dismiss timer
+  // fires — the overlay component owns the timing, this just removes it.
+  const dismissPing = useCallback((id: string) => {
+    setState((s) => ({ ...s, incomingPings: s.incomingPings.filter((p) => p.id !== id) }));
+  }, []);
+
+  // Clears a shown ping:sendError once its toast's own auto-dismiss timer
+  // fires (App.tsx) — otherwise a rejected ping's message would sit on
+  // screen forever, unlike every other transient toast in this app.
+  const dismissPingError = useCallback(() => {
+    setState((s) => ({ ...s, pingError: null }));
   }, []);
 
   // Wired to <YoutubePlayer onStateChange>. Reject playback without a room
@@ -555,5 +614,8 @@ export function usePlaybackSync(
     handlePlayerStateChange,
     handlePlayerReady,
     sendChatMessage,
+    sendPingSignal,
+    dismissPing,
+    dismissPingError,
   };
 }

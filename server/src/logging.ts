@@ -1,47 +1,13 @@
 import type { DatabaseSync } from "node:sqlite";
+import { LOG_ACTIONS, type LogAction, type LogEvent, type LogEventView } from "../../shared/src/types.ts";
 import { getAccountById } from "./accounts.ts";
 
-// Structured server-side observability (see CLAUDE.md's request: "Add
-// structured server-side observability"). Exactly these 15 action kinds are
-// ever logged — one per meaningful state change, never a raw request/response
-// dump.
-export const LOG_ACTIONS = [
-  "ROOM_CREATE",
-  "ROOM_JOIN",
-  "ROOM_LEAVE",
-  "TRACK_ADD",
-  "PROPOSAL_CREATE",
-  "VOTE_CAST",
-  "PROPOSAL_PASS",
-  "PROPOSAL_FAIL",
-  "PROPOSAL_CANCEL",
-  "PLAYBACK_CHANGE",
-  "QUEUE_REMOVE",
-  "QUEUE_REORDER",
-  "CHAT_SEND",
-  "RECONNECT",
-  "ROOM_AUTO_CLOSE",
-] as const;
-
-export type LogAction = (typeof LOG_ACTIONS)[number];
-
-// Deliberately narrow: there is no displayName, clientId, socketId or IP
-// field here at all, so a caller can't accidentally log one through — see
-// CLAUDE.md's Persistence section ("Do not persist socket IDs or transient
-// UI state") and this feature's own "do not log unnecessary personal
-// information" requirement. accountId (a stable server identity, never a
-// display name) is the only per-user field.
-export interface LogEvent {
-  timestamp: string;
-  action: LogAction;
-  result: string;
-  roomId?: string;
-  accountId?: string;
-  proposalId?: string;
-  playbackId?: string;
-  revision?: number;
-  detail?: string;
-}
+// LOG_ACTIONS/LogAction/LogEvent/LogEventView live in shared/src/types.ts
+// (not here) so the landing-page activity-log viewer (client/src/LogViewer.tsx)
+// can render them without the client ever importing from server/src —
+// re-exported here so every existing server-side import of them keeps working
+// unchanged.
+export { LOG_ACTIONS, type LogAction, type LogEvent, type LogEventView };
 
 export type LogEventInput = Omit<LogEvent, "timestamp">;
 
@@ -150,10 +116,6 @@ export function listRecentLogs(db: DatabaseSync, options: { roomId?: string; now
     ? db.prepare(`SELECT ${LOG_COLUMNS} FROM logs WHERE roomId = ? ORDER BY id DESC`).all(options.roomId)
     : db.prepare(`SELECT ${LOG_COLUMNS} FROM logs ORDER BY id DESC`).all();
   return rows.map(rowToLogEvent);
-}
-
-export interface LogEventView extends LogEvent {
-  accountDisplayName: string | null;
 }
 
 // Decorates each row with its account's *current* displayName, purely for a

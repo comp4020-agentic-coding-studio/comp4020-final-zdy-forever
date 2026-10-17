@@ -17,6 +17,7 @@ import type {
   RoomPlaybackSnapshot,
 } from "../../shared/src/types.ts";
 import { getAccountByClientId, getAccountById, registerAccount, renameAccount } from "./accounts.ts";
+import { CodeGuessRateLimiter } from "./codeGuessRateLimit.ts";
 import { openDatabase } from "./db.ts";
 import { handleYoutubeError } from "./httpErrors.ts";
 import { listRecentLogs, withAccountDisplayNames } from "./logging.ts";
@@ -87,6 +88,11 @@ const PRESENCE_PING_TIMEOUT_MS = 5_000;
 const httpServer = createServer(app);
 const io = new Server(httpServer, { pingInterval: PRESENCE_PING_INTERVAL_MS, pingTimeout: PRESENCE_PING_TIMEOUT_MS });
 const { presence, evictIfClosed } = attachRealtime(io, db);
+
+// Shared by every endpoint that resolves a room from a guessed code/number
+// (join-by-code and the landing-page logs lookup below) — see
+// codeGuessRateLimit.ts for why these share one budget.
+const codeGuessLimiter = new CodeGuessRateLimiter();
 
 app.get("/api/health", (_req, res) => {
   const body: HealthResponse = { status: "ok", uptime: process.uptime() };
@@ -261,6 +267,12 @@ app.post("/api/rooms/:roomId/join", (req, res) => {
 app.post("/api/rooms/join-by-code", (req, res) => {
   const accountId = authenticate(req, res);
   if (!accountId) return;
+  // A private code is only reachable by guessing it — nothing else bounds
+  // how often one account may try (see codeGuessRateLimit.ts).
+  if (!codeGuessLimiter.tryConsume(accountId, Date.now())) {
+    res.status(429).json({ error: "too many attempts — slow down and try again shortly" });
+    return;
+  }
   const body = req.body as { code?: unknown };
   const token = typeof body.code === "string" ? body.code.trim() : "";
 
@@ -382,6 +394,47 @@ app.get("/api/rooms/:roomId/logs", (req, res) => {
     return;
   }
   res.json(withAccountDisplayNames(db, listRecentLogs(db, { roomId })));
+});
+
+// The landing-page "View activity log" button's lookup — reachable before
+// ever joining a room, so it takes a 6-digit private code or 7-digit public
+// room number instead of a roomId (the same dual-length disambiguation
+// join-by-code already uses), resolved through the exact same
+// getActiveRoomByCode/getActiveRoomByNumber used there. Deliberately does
+// NOT require live presence/membership (unlike the per-room route above) —
+// that's the whole point of a pre-join viewer — but still requires a
+// registered account (authenticateQuery), and a wrong/private code answers
+// the same 404 either way so this can't be used to probe for a private
+// room's existence, exactly like join-by-code itself.
+app.get("/api/rooms/logs", (req, res) => {
+  const accountId = authenticateQuery(req, res);
+  if (!accountId) return;
+  // Shares join-by-code's guess-rate budget (codeGuessRateLimit.ts) — this
+  // route guesses the exact same secret space, so it must never be a second,
+  // unthrottled way in.
+  if (!codeGuessLimiter.tryConsume(accountId, Date.now())) {
+    res.status(429).json({ error: "too many attempts — slow down and try again shortly" });
+    return;
+  }
+  const token = typeof req.query.code === "string" ? req.query.code.trim() : "";
+
+  let room: Room | undefined;
+  if (/^\d{6}$/.test(token)) {
+    room = getActiveRoomByCode(db, token);
+  } else if (/^\d{7}$/.test(token)) {
+    room = getActiveRoomByNumber(db, token);
+    if (room && room.visibility !== "PUBLIC") room = undefined;
+  } else {
+    res.status(400).json({ error: "enter a 6-digit private code or a 7-digit public room number" });
+    return;
+  }
+
+  if (!room) {
+    res.status(404).json({ error: "invalid code" });
+    return;
+  }
+
+  res.json(withAccountDisplayNames(db, listRecentLogs(db, { roomId: room.roomId })));
 });
 
 // There is no search: YouTube offers none without the Data API v3, which

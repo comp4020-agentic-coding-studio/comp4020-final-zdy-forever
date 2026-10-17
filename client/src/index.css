@@ -923,3 +923,225 @@ form {
     border-width: 0.25rem;
   }
 }
+
+/* ======================================================== ping wheel */
+
+@keyframes ping-wheel-pop {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.6);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@keyframes ping-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(0.5rem) scale(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* Anchored at the cursor via inline left/top (see PingWheel.tsx); fixed so
+   scrolling never drifts it away from the cursor it opened under. Sits well
+   above every other z-index in this file (the next highest, the member
+   popover, is 20) since it must cover absolutely everything while held. */
+.ping-wheel {
+  position: fixed;
+  z-index: 500;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  animation: ping-wheel-pop 0.18s var(--bounce);
+}
+
+.ping-wheel-center {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1.1rem;
+  height: 1.1rem;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: var(--cream);
+  border: var(--border-w) solid var(--ink);
+  box-shadow: var(--pop-shadow-sm);
+}
+
+.ping-wheel-slice {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+  width: 4.5rem;
+  margin-left: -2.25rem;
+  margin-top: -2.25rem;
+  padding: 0.4rem 0.3rem;
+  border-radius: var(--radius-md);
+  border: var(--border-w) solid var(--ink);
+  background: var(--cream);
+  box-shadow: var(--pop-shadow-sm);
+  text-align: center;
+}
+
+/* Positioning (the rotate/translateY/counter-rotate placing each slice
+   around the anchor) is set inline per-slice by PingWheel.tsx — this only
+   ever changes appearance, never transform, so it can't fight that. */
+.ping-wheel-slice--hovered {
+  background: var(--candy-purple);
+  color: #fff;
+  box-shadow: var(--card-shadow);
+}
+
+.ping-wheel-slice--cooldown:not(.ping-wheel-slice--hovered) {
+  opacity: 0.45;
+}
+
+.ping-wheel-icon {
+  font-size: 1.4rem;
+  line-height: 1;
+}
+
+.ping-wheel-label {
+  font-size: 0.65rem;
+  font-weight: 800;
+}
+
+/* ========================================================== ping pops */
+
+/* One per signal, positioned at its own xRatio/yRatio (set inline — see
+   App.tsx's PingPop) rather than stacked in a corner — this is where the
+   sender's wheel was actually opened, scaled to this viewer's own viewport.
+   Sits above everything (matches .ping-wheel's z-index: 500) and never
+   blocks clicks underneath it. */
+.ping-pop {
+  position: fixed;
+  z-index: 500;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+  pointer-events: none;
+  animation: ping-toast-in 0.15s var(--bounce), ping-pop-out 0.35s ease-in 1.45s forwards;
+}
+
+.ping-pop-icon {
+  font-size: 2.4rem;
+  line-height: 1;
+  filter: drop-shadow(0 3px 0 rgba(43, 33, 64, 0.35));
+}
+
+.ping-pop-name {
+  padding: 0.15rem 0.6rem;
+  border-radius: var(--radius-full);
+  border: var(--border-w) solid var(--ink);
+  background: var(--cream);
+  font-weight: 800;
+  font-size: 0.8rem;
+  box-shadow: var(--pop-shadow-sm);
+  white-space: nowrap;
+}
+
+@keyframes ping-pop-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+    transform: translate(-50%, -50%) translateY(-0.5rem);
+  }
+}
+
+/* Shown when a ping is rejected (almost always the server's rate limit) —
+   fixed and centered at the top, not at a specific xRatio/yRatio, since this
+   is only ever shown to the one person whose own signal was turned away,
+   never broadcast. Sits above the ping wheel itself (higher z-index) since
+   it most often appears right as the wheel closes. */
+.ping-error-toast {
+  position: fixed;
+  top: 1rem;
+  left: 50%;
+  z-index: 600;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 0.6rem 1.1rem;
+  border: var(--border-w) solid var(--candy-red-dark);
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--candy-red) 15%, #fff);
+  font-weight: 700;
+  box-shadow: var(--card-shadow);
+  animation: ping-toast-in 0.15s var(--bounce);
+}
+
+/* =================================================== activity log viewer */
+
+.log-viewer-dialog {
+  width: min(30rem, calc(100% - 2rem));
+  max-height: calc(100dvh - 2rem);
+  overflow: auto;
+  color: var(--ink);
+}
+
+.log-viewer-dialog::backdrop {
+  background: rgb(25 18 43 / 55%);
+}
+
+.log-viewer-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin: 1rem 0 0.6rem;
+}
+
+.log-viewer-heading h3 {
+  margin: 0;
+}
+
+.log-viewer-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 20rem;
+  overflow: auto;
+  border: var(--border-w) solid var(--ink);
+  border-radius: var(--radius-md);
+}
+
+.log-viewer-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--ink) 15%, transparent);
+}
+
+.log-viewer-row:nth-child(even) {
+  background: color-mix(in srgb, var(--candy-purple) 6%, #fff);
+}
+
+.log-viewer-row:last-child {
+  border-bottom: none;
+}
+
+.log-viewer-text {
+  flex: 1 1 auto;
+}
+
+.log-viewer-row time {
+  flex: 0 0 auto;
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}

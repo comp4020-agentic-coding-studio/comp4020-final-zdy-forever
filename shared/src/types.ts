@@ -206,3 +206,90 @@ export interface DjHandoff {
   requestId: string;
   expiresAt: number;
 }
+
+// Ephemeral room-scoped signals from the Ctrl-held ping wheel — never
+// persisted, never replayed to a late joiner, and never a reaction-on-video
+// echo (see docs/adr/0013-ping-signals-are-not-reactions.md for why this
+// doesn't reopen docs/adr/0006's removal of reactions). A closed union (not a
+// free string) keeps the emoji/label mapping identical on both sides and
+// makes an invalid client payload trivially rejectable server-side.
+export const PING_SIGNALS = [
+  "QUESTION",
+  "LAUGH",
+  "WOW",
+  "LOVE",
+  "FIRE",
+  "THUMBS_UP",
+  "THUMBS_DOWN",
+  "CATCH_UP",
+] as const;
+
+export type PingSignal = (typeof PING_SIGNALS)[number];
+
+// The server's ping:new broadcast. accountId/displayName are stamped
+// server-side from the authenticated socket, never trusted from the client
+// (same rule as ChatMessage) — a client only ever sends { signal, xRatio,
+// yRatio }. xRatio/yRatio are fractions of the sender's own viewport
+// (0..1, each clamped server-side) rather than raw pixels, so the pop
+// appears at the same relative spot on every member's screen regardless of
+// window size — the same idea as lolPing's screen-relative ping position.
+export interface PingBroadcast {
+  accountId: string;
+  displayName: string;
+  signal: PingSignal;
+  xRatio: number;
+  yRatio: number;
+  sentAt: string;
+}
+
+// Structured server-side observability (server/src/logging.ts). Exactly
+// these 15 action kinds are ever logged — one per meaningful state change,
+// never a raw request/response dump. Shared (not server-only) so the
+// landing-page activity-log viewer (client/src/LogViewer.tsx) can render
+// these without the client ever importing from server/src.
+export const LOG_ACTIONS = [
+  "ROOM_CREATE",
+  "ROOM_JOIN",
+  "ROOM_LEAVE",
+  "TRACK_ADD",
+  "PROPOSAL_CREATE",
+  "VOTE_CAST",
+  "PROPOSAL_PASS",
+  "PROPOSAL_FAIL",
+  "PROPOSAL_CANCEL",
+  "PLAYBACK_CHANGE",
+  "QUEUE_REMOVE",
+  "QUEUE_REORDER",
+  "CHAT_SEND",
+  "RECONNECT",
+  "ROOM_AUTO_CLOSE",
+] as const;
+
+export type LogAction = (typeof LOG_ACTIONS)[number];
+
+// Deliberately narrow: there is no displayName, clientId, socketId or IP
+// field here at all, so a caller can't accidentally log one through — see
+// CLAUDE.md's Persistence section ("Do not persist socket IDs or transient
+// UI state") and this feature's own "do not log unnecessary personal
+// information" requirement. accountId (a stable server identity, never a
+// display name) is the only per-user field.
+export interface LogEvent {
+  timestamp: string;
+  action: LogAction;
+  result: string;
+  roomId?: string;
+  accountId?: string;
+  proposalId?: string;
+  playbackId?: string;
+  revision?: number;
+  detail?: string;
+}
+
+// LogEvent decorated with the account's *current* displayName, purely for a
+// human reading the feed (server/src/logging.ts's withAccountDisplayNames) —
+// a read-only join done at render time, never stored or logged. displayName
+// may duplicate across accounts, so this can never replace accountId as the
+// row's real identity, only label it for display.
+export interface LogEventView extends LogEvent {
+  accountDisplayName: string | null;
+}

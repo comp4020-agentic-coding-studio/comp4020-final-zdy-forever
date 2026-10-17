@@ -15,7 +15,7 @@ import { addTrack } from "./queue.ts";
 import type { ProposalManager } from "./proposals.ts";
 import type { PresenceStore } from "./presence.ts";
 import { attachRealtime } from "./realtime.ts";
-import { AUTO_CLOSE_INACTIVITY_MS, createRoom, joinRoom, MAX_ROOM_USERS } from "./rooms.ts";
+import { AUTO_CLOSE_INACTIVITY_MS, createRoom, getRoomById, joinRoom, MAX_ROOM_USERS } from "./rooms.ts";
 
 // Exercises the actual wire protocol end to end (real httpServer + socket.io
 // Server + socket.io-client connections on localhost), not just PresenceStore
@@ -1588,5 +1588,151 @@ describe("realtime room closure", () => {
     await joined(alice, "client-alice");
     handles.checkClosedRooms();
     expect(handles.presence.count(roomId)).toBe(1);
+  });
+});
+
+describe("realtime ping signals", () => {
+  let dir: string;
+  let db: DatabaseSync;
+  let httpServer: ReturnType<typeof createServer>;
+  let io: Server;
+  let baseUrl: string;
+  let roomId: string;
+  let otherRoomId: string;
+  let clients: ClientSocket[];
+  let alice: Account;
+  let bob: Account;
+  let handles: ReturnType<typeof attachRealtime>;
+
+  function connect(account: Account, clientId: string): Promise<ClientSocket> {
+    return new Promise((resolve, reject) => {
+      const socket = ioClient(baseUrl, {
+        auth: { accountId: account.accountId, clientId },
+        transports: ["websocket"],
+        forceNew: true,
+      });
+      clients.push(socket);
+      socket.once("connect", () => resolve(socket));
+      socket.once("connect_error", (err) => reject(err));
+    });
+  }
+
+  function waitFor<T = unknown>(socket: ClientSocket, event: string): Promise<T> {
+    return new Promise((resolve) => socket.once(event, (payload: T) => resolve(payload)));
+  }
+
+  async function joined(account: Account, clientId: string, targetRoomId = roomId): Promise<ClientSocket> {
+    const socket = await connect(account, clientId);
+    socket.emit("room:join", { roomId: targetRoomId });
+    await waitFor(socket, "room:snapshot");
+    return socket;
+  }
+
+  beforeEach(async () => {
+    dir = mkdtempSync(path.join(tmpdir(), "echo-room-realtime-ping-"));
+    db = openDatabase(path.join(dir, "echo-room.sqlite"));
+    clients = [];
+
+    httpServer = createServer();
+    io = new Server(httpServer);
+    handles = attachRealtime(io, db, { closureCheckIntervalMs: 0 });
+    await new Promise<void>((resolve) => httpServer.listen(0, resolve));
+    const { port } = httpServer.address() as AddressInfo;
+    baseUrl = `http://localhost:${port}`;
+
+    alice = registerAccount(db, "client-alice", "Alice");
+    bob = registerAccount(db, "client-bob", "Bob");
+    roomId = createRoom(db, { accountId: alice.accountId, name: "Ping room", visibility: "PUBLIC", autoCloseEnabled: false })
+      .roomId;
+    otherRoomId = createRoom(db, { accountId: bob.accountId, name: "Other room", visibility: "PUBLIC", autoCloseEnabled: false })
+      .roomId;
+  });
+
+  afterEach(async () => {
+    handles.proposals.dispose();
+    for (const client of clients) client.close();
+    await new Promise<void>((resolve) => io.close(() => resolve()));
+    await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("broadcasts a signal and its viewport-relative position to every member of the room, including the sender", async () => {
+    const aliceSocket = await joined(alice, "client-alice");
+    const bobSocket = await joined(bob, "client-bob");
+
+    const aliceSees = waitFor<{ accountId: string; displayName: string; signal: string; xRatio: number; yRatio: number }>(aliceSocket, "ping:new");
+    const bobSees = waitFor<{ accountId: string; displayName: string; signal: string; xRatio: number; yRatio: number }>(bobSocket, "ping:new");
+    aliceSocket.emit("ping:send", { signal: "FIRE", xRatio: 0.25, yRatio: 0.75 });
+
+    expect(await aliceSees).toMatchObject({ accountId: alice.accountId, displayName: "Alice", signal: "FIRE", xRatio: 0.25, yRatio: 0.75 });
+    expect(await bobSees).toMatchObject({ accountId: alice.accountId, displayName: "Alice", signal: "FIRE", xRatio: 0.25, yRatio: 0.75 });
+  });
+
+  it("clamps an out-of-range or missing position to the 0..1 viewport range instead of trusting the client", async () => {
+    const aliceSocket = await joined(alice, "client-alice");
+    const sees = waitFor<{ xRatio: number; yRatio: number }>(aliceSocket, "ping:new");
+    aliceSocket.emit("ping:send", { signal: "FIRE", xRatio: 5, yRatio: -3 });
+    expect(await sees).toMatchObject({ xRatio: 1, yRatio: 0 });
+
+    const sees2 = waitFor<{ xRatio: number; yRatio: number }>(aliceSocket, "ping:new");
+    aliceSocket.emit("ping:send", { signal: "FIRE" });
+    const second = await sees2;
+    expect(second.xRatio).toBeGreaterThanOrEqual(0);
+    expect(second.xRatio).toBeLessThanOrEqual(1);
+    expect(second.yRatio).toBeGreaterThanOrEqual(0);
+    expect(second.yRatio).toBeLessThanOrEqual(1);
+  });
+
+  it("never reaches a different room", async () => {
+    const aliceSocket = await joined(alice, "client-alice", roomId);
+    const bobSocket = await joined(bob, "client-bob", otherRoomId);
+
+    let bobSawPing = false;
+    bobSocket.on("ping:new", () => { bobSawPing = true; });
+    const aliceSees = waitFor(aliceSocket, "ping:new");
+    aliceSocket.emit("ping:send", { signal: "LOVE" });
+    await aliceSees;
+
+    expect(bobSawPing).toBe(false);
+  });
+
+  it("rejects sending before joining a room and an unknown signal", async () => {
+    const socket = await connect(alice, "client-alice");
+    const notInRoom = waitFor<{ error: string }>(socket, "ping:sendError");
+    socket.emit("ping:send", { signal: "FIRE" });
+    expect((await notInRoom).error).toBe("join a room before sending a signal");
+
+    socket.emit("room:join", { roomId });
+    await waitFor(socket, "room:snapshot");
+    const badSignal = waitFor<{ error: string }>(socket, "ping:sendError");
+    socket.emit("ping:send", { signal: "NOT_A_SIGNAL" });
+    expect((await badSignal).error).toBe("unsupported signal");
+  });
+
+  it("allows exactly 3 signals within 10 seconds, then throttles until the window elapses", async () => {
+    const aliceSocket = await joined(alice, "client-alice");
+    for (let i = 0; i < 3; i++) {
+      const sent = waitFor(aliceSocket, "ping:new");
+      aliceSocket.emit("ping:send", { signal: "WOW" });
+      await sent;
+    }
+    const throttled = waitFor<{ error: string }>(aliceSocket, "ping:sendError");
+    aliceSocket.emit("ping:send", { signal: "WOW" });
+    expect((await throttled).error).toBe("slow down — too many signals");
+  }, 15_000);
+
+  it("never counts as meaningful activity: sending signals alone does not reset the room's inactivity clock", async () => {
+    const before = getRoomById(db, roomId)!.lastMeaningfulActivityAt;
+    const aliceSocket = await joined(alice, "client-alice");
+    // Joining itself is meaningful activity, so read lastMeaningfulActivityAt
+    // again only after the join, then confirm pinging alone never advances it.
+    const afterJoin = getRoomById(db, roomId)!.lastMeaningfulActivityAt;
+    const sent = waitFor(aliceSocket, "ping:new");
+    aliceSocket.emit("ping:send", { signal: "THUMBS_UP" });
+    await sent;
+    const afterPing = getRoomById(db, roomId)!.lastMeaningfulActivityAt;
+    expect(afterPing).toBe(afterJoin);
+    expect(afterJoin >= before).toBe(true);
   });
 });

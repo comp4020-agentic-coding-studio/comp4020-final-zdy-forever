@@ -202,11 +202,88 @@ describe("rooms", () => {
     expect((await post("/api/rooms/join-by-code", { ...bob, code: "12345" })).status).toBe(400);
   });
 
+  // A 6-digit private code is only reachable by guessing it, so nothing else
+  // bounds how often one account may try — without this, any registered
+  // account could enumerate the whole 1,000,000-code space.
+  it("throttles repeated code guesses from one account, shared across join-by-code and the logs lookup", async () => {
+    const mallory = await register("Mallory");
+    let rejected = false;
+    for (let i = 0; i < 15 && !rejected; i++) {
+      const attempt = await post("/api/rooms/join-by-code", { ...mallory, code: "000000" });
+      if (attempt.status === 429) rejected = true;
+    }
+    expect(rejected).toBe(true);
+    // The budget is shared: having just exhausted it via join-by-code, the
+    // logs lookup (a different endpoint guessing the same secret space) is
+    // throttled too, not given a fresh allowance of its own.
+    expect((await get("/api/rooms/logs", { ...mallory, code: "000000" })).status).toBe(429);
+  });
+
   it("rejects over-long display and room names", async () => {
     expect((await post("/api/register", { clientId: randomUUID(), displayName: "x".repeat(33) })).status).toBe(400);
 
     const alice = await register("Alice");
     const tooLong = await post("/api/rooms", { ...alice, name: "x".repeat(21), visibility: "PUBLIC" });
     expect(tooLong.status).toBe(400);
+  });
+});
+
+// The landing page's "View activity log" button — reachable before ever
+// joining a room, so it looks a room up by its code/number rather than
+// requiring membership like GET /api/rooms/:roomId/logs does.
+describe("the landing-page activity log lookup", () => {
+  it("resolves a private room by its 6-digit code and reflects a real action", async () => {
+    const alice = await register("Alice");
+    const room = await createRoom(alice, "PRIVATE");
+
+    const { status, body } = await get("/api/rooms/logs", { ...alice, code: room.code! });
+    expect(status).toBe(200);
+    const events = body as { action: string; roomId: string }[];
+    expect(events.some((e) => e.action === "ROOM_CREATE" && e.roomId === room.roomId)).toBe(true);
+  });
+
+  it("resolves a public room by its 7-digit room number", async () => {
+    const alice = await register("Alice");
+    const room = await createRoom(alice, "PUBLIC");
+
+    const { status, body } = await get("/api/rooms/logs", { ...alice, code: room.roomNumber! });
+    expect(status).toBe(200);
+    const events = body as { roomId: string }[];
+    expect(events.every((e) => e.roomId === room.roomId)).toBe(true);
+  });
+
+  it("404s on a code/number that matches no active room", async () => {
+    const alice = await register("Alice");
+    const room = await createRoom(alice, "PRIVATE");
+    // A code one digit different from a real, just-created private code
+    // could in principle collide with some other test's room, but never
+    // with this one's — wrong either way.
+    const wrong = room.code === "000000" ? "000001" : "000000";
+    const miss = await get("/api/rooms/logs", { ...alice, code: wrong });
+    if (miss.status === 200) expect((miss.body as { roomId: string }[]).every((e) => e.roomId !== room.roomId)).toBe(true);
+    else expect(miss.status).toBe(404);
+  });
+
+  it("400s on neither a 6-digit nor a 7-digit code", async () => {
+    const alice = await register("Alice");
+    expect((await get("/api/rooms/logs", { ...alice, code: "12345" })).status).toBe(400);
+  });
+
+  it("requires the clientId that registered the account", async () => {
+    const alice = await register("Alice");
+    const mallory = await register("Mallory");
+    const room = await createRoom(alice, "PUBLIC");
+
+    expect((await get("/api/rooms/logs", { accountId: alice.accountId, clientId: mallory.clientId, code: room.roomNumber! })).status).toBe(401);
+  });
+
+  it("never requires being present in the room — that's the whole point of a pre-join lookup", async () => {
+    const alice = await register("Alice");
+    const bob = await register("Bob");
+    const room = await createRoom(alice, "PUBLIC");
+
+    // Bob has never joined this room at all.
+    const { status } = await get("/api/rooms/logs", { ...bob, code: room.roomNumber! });
+    expect(status).toBe(200);
   });
 });
