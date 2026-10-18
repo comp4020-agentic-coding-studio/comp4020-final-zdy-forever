@@ -91,6 +91,13 @@ including legacy rooms; there is no creation-form toggle or client opt-out.
 
 Heartbeat/network traffic does not count as activity.
 
+The pre-join lobby offers a view of a room's recent structured activity log by
+its code/number, without requiring membership or presence — unlike reading a
+room's log once inside it. Render it in plain language, never raw log rows.
+Server-side observability logging never records message text, clientId,
+socketId or IP — only a stable account identity and what it did — so there is
+nothing sensitive for this view to accidentally surface.
+
 ## Authority
 
 The server is authoritative for all shared state.
@@ -248,6 +255,30 @@ Use room-scoped plain-text chat instead of reactions or historical echoes.
 - Validate text length and rate-limit sends per room/account.
 - Never put message text in server logs.
 
+## Signals
+
+A ping wheel lets a room member hold Ctrl to open a radial picker anchored at
+the cursor and release over a slice to broadcast a signal. This is not a
+reaction echo (see `docs/adr/0013-ping-signals-are-not-reactions.md` for why
+it does not reopen Room chat's replacement of reactions):
+
+- Never persisted; never replayed to a late joiner or on reconnect.
+- Never logged (not one of the 15 observability actions) and never counts as
+  meaningful room activity.
+- Broadcast as a fraction of the sender's own viewport (not raw pixels), so
+  it appears at the same relative position for every viewer.
+- Rate-limited server-side per room/account (currently 3 per rolling 10
+  seconds); the client may dim the wheel as a local hint of this, but must
+  never itself block a send — only the server's rejection is authoritative,
+  and a rejection must be shown to the sender, never swallowed silently.
+- Sending one never requires voting.
+
+A 6-digit private room code or 7-digit public room number is a secret that
+can only be reached by guessing it; any endpoint that resolves one (joining,
+or looking up a room's activity log before joining) must share one
+per-account rate limit against that same guess space, not reset separately
+per endpoint.
+
 ## UI
 
 Use a playful party-game visual language:
@@ -277,6 +308,10 @@ the player. Small screens stack these sections without remounting the player.
 Wide desktop rooms fit the viewport with aligned player/chat/queue card bottoms.
 Scale using both viewport dimensions, preserve the video's aspect ratio, and
 scroll chat/queue contents inside their panels rather than growing the page.
+
+A small confetti burst and sound at every left click is purely decorative and
+purely local to the clicking browser — never broadcast, synced or persisted,
+unlike a ping wheel signal.
 
 ## Reliability
 

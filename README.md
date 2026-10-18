@@ -14,6 +14,8 @@ Anyone can add videos and chat without permission. Adding to the queue lets each
 
 A vote lasts up to 15 seconds. YES and NO count; nonresponses abstain. A strict majority of votes cast passes, ties fail, and one YES with no NO passes at the deadline. A sole listener acts immediately; otherwise early resolution requires everyone present to vote. Abstaining leaves you in the room. The cost is deliberate: silence does not veto another person's request, so someone who objects must respond.
 
+A Ctrl-held ping wheel sends a quick, rate-limited reaction to everyone present without a vote, since it changes nobody's playback; click confetti is a purely local flourish nobody else sees.
+
 **Verification, 11 October 2026:** the earlier deployment rejected a lone YES when another connected member abstained. After the correction was deployed, an agent-run check kept that member connected but idle for 310 seconds; Skip passed at the end of the 15-second vote. The [verification record](https://github.com/comp4020-agentic-coding-studio/comp4020-final-zdy-forever/blob/main/docs/evidence/2026-10-11/README.md) distinguishes the before and after results.
 
 ## Small rooms with a limited lifetime
