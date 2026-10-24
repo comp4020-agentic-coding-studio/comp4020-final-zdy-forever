@@ -1,0 +1,46 @@
+# Two-viewport check — 24 October 2026
+
+Agent-run (Claude Code) black-box check of the deployed app, recorded for the
+brief's marking conditions: two isolated browser profiles, one at each marking
+viewport, plus simultaneous actions and a degraded network. It is not a human
+usability session and not the Crit 10 classmate exercise.
+
+- URL: https://comp4020-final-zdy-forever.fly.dev/ (release v12, commit
+  `dac6174`, before the one-week expiry change).
+- Tool: [`two-viewport-check.mjs`](two-viewport-check.mjs), Playwright driving
+  local Chrome headless. Profile A at 1920×1080; profile B at 390×844, mobile
+  emulation. Separate browser contexts share no cookies or storage.
+- Scope: one private room (code 214409), two accounts, three public YouTube
+  videos. The same script first passed 18/18 against a local build.
+
+## Results (deployed, 18/18 passed)
+
+| Check | Result |
+| --- | --- |
+| No horizontal scroll, lobby and room, both viewports | pass |
+| B joins A's private room by its 6-digit code | pass |
+| Chat A→B / B→A appears without reload | 79 ms / 82 ms |
+| A and B add tracks at the same moment | both kept; both views show the same queue |
+| A and B propose Skip at the same moment | one vote opens; both see it |
+| Both vote (YES/NO) | resolves 24 ms after the second vote; tie fails |
+| Desktop room fits 1080 px height, player fully visible | pass (`scrollHeight` 1080) |
+| Phone player within 390 px width | pass (312×172) |
+| B offline ~3 s while A chats, then back online | missed message appears 4.3 s after reconnect |
+| B refreshes | chat history and queue restored |
+| No uncaught page errors in either profile | pass |
+
+Screenshots: [desktop room](room-1920.png), [phone room, full page](room-390-full.png),
+[phone lobby](lobby-390.png). The video area is black because headless Chrome
+did not render YouTube video; the decorations scattered over the page are the
+local click confetti from the script's own clicks.
+
+## Limits
+
+- The "slow network" step applied Chrome's network throttling (400 ms latency,
+  50 kB/s), but chat still arrived in about 80 ms: DevTools throttling does not
+  apply to an already-open WebSocket. So it does **not** measure real-time
+  behaviour on a slow link. The offline step does test reconnection, which
+  recovers from the server snapshot rather than from missed events, matching
+  Socket.IO's at-most-once delivery.
+- YouTube playback sync, ads and buffering were not observed.
+- One run; timings are single samples, not distributions.
