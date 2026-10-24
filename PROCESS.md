@@ -32,7 +32,7 @@ To make the room feel like a party, I gave the agent existing examples rather th
 
 ## Observability and multi-user evidence
 
-Structured logs record each account and what it did, never chat text, `clientId` or IP ([`3f1eab5`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-zdy-forever/commit/3f1eab5)). At Crit 10, two classmates used the app from its URL in separate Chrome profiles while I read the logs: every important action and actor was visible, and chat content was not. The permission rules are collected in [ADR 0015](docs/adr/0015-who-may-see-and-change-what.md). Others added bug-report features; I judged this small app unlikely to need one.
+Structured logs record each account and what it did, never chat text, `clientId` or IP ([`3f1eab5`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-zdy-forever/commit/3f1eab5)). At Crit 10, two classmates used the app from its URL in separate Chrome profiles while I read the logs: every important action and actor was visible, and chat content was not. The permission rules are collected in [ADR 0015](docs/adr/0015-who-may-see-and-change-what.md). Others added bug-report features; after first judging bugs unlikely, I added only an email address on the entry page, since the logs reconstruct what happened once someone reports it.
 
 When video buffered during my own testing, the agent reported a SQLite fix as "17 times faster" ([`3863e71`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-zdy-forever/commit/3863e71)). I never saw a measurement, so [ADR 0011](docs/adr/0011-sqlite-wal-mode.md) records it as unverified. A code change is not a root cause.
 

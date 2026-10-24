@@ -584,6 +584,9 @@ function App() {
         )}
         {!accountId && <p>pick a display name above to create or join a room</p>}
       </div>
+      <p className="bug-report">
+        🐞 Found a bug? Email <a href="mailto:u7782042@anu.edu.au?subject=Watch%20YouTube%20Together%20bug">u7782042@anu.edu.au</a>
+      </p>
     </section>
   );
 
