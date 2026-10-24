@@ -507,6 +507,26 @@ form {
   background: var(--candy-purple);
 }
 
+.signal-menu-toggle {
+  cursor: pointer;
+  color: var(--ink);
+}
+
+.signal-menu-toggle[aria-expanded="true"] {
+  background: var(--candy-orange, var(--candy-yellow));
+}
+
+.signal-menu-panel {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 0.65rem);
+  right: 0.9rem;
+  width: min(22rem, calc(100% - 1.8rem));
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
 .room-members-panel {
   position: absolute;
   z-index: 20;

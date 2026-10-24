@@ -14,6 +14,7 @@ import { PingWheel, PING_META } from "./PingWheel.tsx";
 import { RoomChat } from "./RoomChat.tsx";
 import { RoomMembersPopover } from "./RoomMembersPopover.tsx";
 import { SeekControl } from "./SeekControl.tsx";
+import { SignalMenu } from "./SignalMenu.tsx";
 import { DjHandoffDialog } from "./DjHandoffDialog.tsx";
 import { getClientId } from "./clientId.ts";
 import { loadRoomId, saveRoomId } from "./roomSession.ts";
@@ -653,6 +654,7 @@ function App() {
           <RoomMembersPopover key={liveRoomId} members={live.presence}
             capacity={live.room.maxUsers} dj={live.playback?.dj ?? null} />
         )}
+        {live.room && <SignalMenu onSendSignal={live.sendPingSignal} />}
         <button type="button" className="btn btn--sm" onClick={live.requestLeaveRoom}>
           🚪 Leave
         </button>

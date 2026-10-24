@@ -273,6 +273,9 @@ it does not reopen Room chat's replacement of reactions):
   never itself block a send — only the server's rejection is authoritative,
   and a rejection must be shown to the sender, never swallowed silently.
 - Sending one never requires voting.
+- Never mouse- or Ctrl-only: a visible signal button in the room bar opens
+  the same signals as ordinary buttons for keyboard and touch (a phone has
+  no Ctrl key), through the same send path and rate limit.
 
 A 6-digit private room code or 7-digit public room number is a secret that
 can only be reached by guessing it; any endpoint that resolves one (joining,
