@@ -74,9 +74,14 @@ against the deployment (release with commit `b176ed3`). 22/22 passed:
   resolves when B votes. 1366×640 has no horizontal scroll and the player
   stays visible.
 
-Three early failures were the script's own timing (tabbing before the socket
-connected; too few tracks for a move to be legal), not app faults; they are
-not counted.
+Early failures were the script's own faults, not the app's: tabbing before
+the socket connected, too few tracks for a move to be legal, and, on a rerun
+against the final deployment (commit `e3b0c4a`'s successor), a 19-second
+first video that headless Chrome actually played to the end, so playback
+correctly became empty and the queue showed "restart here" instead of Pause.
+The script now starts with a ten-minute video and passed 22/22 again on the
+final deployment, alongside the two-viewport run (18/18), the signal button
+check and the slow-link run.
 
 What the run could not test was the ping wheel: it needs Ctrl plus a mouse,
 so keyboard users and phones (no Ctrl key) could not send a signal at all.

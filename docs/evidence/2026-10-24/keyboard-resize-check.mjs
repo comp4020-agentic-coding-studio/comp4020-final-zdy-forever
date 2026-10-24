@@ -48,7 +48,7 @@ try {
   await A.getByRole("button", { name: /Create room/ }).click();
   const chip = A.locator('[aria-label^="private room code"]'); await chip.waitFor();
   const code = (await chip.getAttribute("aria-label")).match(/\d{6}/)[0];
-  await A.getByLabel("YouTube link").fill("https://www.youtube.com/watch?v=jNQXAC9IVRw");
+  await A.getByLabel("YouTube link").fill("https://www.youtube.com/watch?v=aqz-KE-bpKQ");
   await A.getByRole("button", { name: /Add to queue/ }).click();
   await A.waitForFunction(() => document.querySelector("iframe"), null, { timeout: 15_000 });
 
@@ -75,8 +75,8 @@ try {
     () => log("keyboard: Enter sends chat, other profile receives it", true),
     () => log("keyboard: Enter sends chat, other profile receives it", false));
 
-  ok = await tabTo(B, () => /Propose Pause/.test(document.activeElement?.textContent ?? ""));
-  log("keyboard: Tab reaches Propose Pause", ok);
+  ok = await tabTo(B, () => document.activeElement?.tagName === "BUTTON" && /Propose Pause/.test(document.activeElement.textContent ?? ""));
+  log("keyboard: Tab reaches Propose Pause", ok, `focused: ${await focusedLabel(B)}`);
   log("keyboard: button shows a focus ring", await focusVisible(B));
   await B.keyboard.press("Enter");
   await A.getByText(/voting…/).waitFor({ timeout: 5_000 }).then(
@@ -98,7 +98,7 @@ try {
   // queue: move buttons are reachable by keyboard (drag has a keyboard alternative)
   await A.getByLabel("YouTube link").fill("https://www.youtube.com/watch?v=M7lc1UVf-VE");
   await A.getByRole("button", { name: /Add to queue/ }).click();
-  await A.getByLabel("YouTube link").fill("https://www.youtube.com/watch?v=aqz-KE-bpKQ");
+  await A.getByLabel("YouTube link").fill("https://www.youtube.com/watch?v=jNQXAC9IVRw");
   await A.getByRole("button", { name: /Add to queue/ }).click();
   await A.getByLabel("YouTube link").fill("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
   await A.getByRole("button", { name: /Add to queue/ }).click();
