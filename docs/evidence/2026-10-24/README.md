@@ -57,6 +57,33 @@ script's own "used websocket" probe is unreliable (resource timing does not
 list WebSockets) and is not counted. Bandwidth limits and packet loss were not
 simulated.
 
+## Keyboard and resize (follow-up run)
+
+[`keyboard-resize-check.mjs`](keyboard-resize-check.mjs) drove profile B with
+the keyboard only (Tab, Enter, Escape) and resized windows mid-interaction,
+against the deployment (release with commit `b176ed3`). 22/22 passed:
+
+- Tab reaches the name field, join field, chat, vote buttons, member popover
+  and queue move buttons; focused controls show an outline.
+- Enter joins by code, sends chat, opens a Pause vote and a reorder vote that
+  the other profile sees. The member popover closes on Escape and focus
+  returns to its button.
+- Shrinking 1280×800 → 390×844 while typing keeps the chat draft and focus,
+  does not reload the player, and the finished message still sends.
+- Resizing to 1600×900 and 820×1180 during an open vote keeps it usable; it
+  resolves when B votes. 1366×640 has no horizontal scroll and the player
+  stays visible.
+
+Three early failures were the script's own timing (tabbing before the socket
+connected; too few tracks for a move to be legal), not app faults; they are
+not counted.
+
+What the run could not test was the ping wheel: it needs Ctrl plus a mouse,
+so keyboard users and phones (no Ctrl key) could not send a signal at all.
+That gap was fixed in `141982e` with a visible signal button; a follow-up
+browser check sent a signal by touch at 390×844 and by keyboard at 1920×1080,
+and each reached the other profile.
+
 ## Limits
 
 - In the first run, Chrome's network throttling (400 ms latency, 50 kB/s) did
