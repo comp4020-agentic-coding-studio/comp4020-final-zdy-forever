@@ -34,12 +34,34 @@ Screenshots: [desktop room](room-1920.png), [phone room, full page](room-390-ful
 did not render YouTube video; the decorations scattered over the page are the
 local click confetti from the script's own clicks.
 
+## Slow link (follow-up run)
+
+The throttling step above did not slow the WebSocket (chat still arrived in
+about 80 ms), so a second script, [`slow-link-check.mjs`](slow-link-check.mjs),
+sent profile B through a local proxy to the same deployment that delays every
+chunk by 300 ms each way, WebSocket frames included (about 600 ms added per
+round trip). Profile A connected directly.
+
+| Check | Result |
+| --- | --- |
+| B joins A's private room | 816 ms |
+| Chat A→B, three samples | 1794, 790, 791 ms |
+| Chat B→A, three samples | 788, 795, 793 ms |
+| B proposes Pause; A sees the vote | 821 ms |
+| A votes YES; B sees it resolve | 813 ms |
+
+With 600 ms of added delay, changes still reached the other profile in about
+0.8 s, in order and without loss. The first sample's 1.8 s is plausibly the
+connection before its WebSocket upgrade; that cause was not verified. The
+script's own "used websocket" probe is unreliable (resource timing does not
+list WebSockets) and is not counted. Bandwidth limits and packet loss were not
+simulated.
+
 ## Limits
 
-- The "slow network" step applied Chrome's network throttling (400 ms latency,
-  50 kB/s), but chat still arrived in about 80 ms: DevTools throttling does not
-  apply to an already-open WebSocket. So it does **not** measure real-time
-  behaviour on a slow link. The offline step does test reconnection, which
+- In the first run, Chrome's network throttling (400 ms latency, 50 kB/s) did
+  not apply to the already-open WebSocket, so that step measured nothing about
+  slow links; the proxy run above replaces it. The offline step does test reconnection, which
   recovers from the server snapshot rather than from missed events, matching
   Socket.IO's at-most-once delivery.
 - YouTube playback sync, ads and buffering were not observed.
