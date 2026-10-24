@@ -40,7 +40,8 @@ failure this ADR fixes.
 
 Two changes, together:
 
-1. **Tighter heartbeat.** `server/src/index.ts` sets `pingInterval: 5000,
+1. **Tighter heartbeat.** (Since [ADR 0016](0016-ten-second-votes.md): votes
+   last 10 seconds and the heartbeat is 4 s + 4 s, worst case ~8 s.) `server/src/index.ts` sets `pingInterval: 5000,
    pingTimeout: 5000` on the Socket.IO `Server`, so the worst case for
    noticing a dead connection (~10s) lands inside the 15-second voting
    window instead of past it.

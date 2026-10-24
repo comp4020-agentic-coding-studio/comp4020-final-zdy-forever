@@ -148,7 +148,7 @@ function planQueueReorder(
 
 // A read-only preview of why a drag would not produce a genuine reorder, or
 // null if it would — used by ProposalManager.requestReorderQueue to reject it
-// before ever opening a 15-second vote over it (CLAUDE.md: "Failed, stale or
+// before ever opening a 10-second vote over it (CLAUDE.md: "Failed, stale or
 // no-op reorder attempts cost nothing," which is cheapest to honor by never
 // starting the vote at all when the outcome is already known).
 export function previewReorderQueue(

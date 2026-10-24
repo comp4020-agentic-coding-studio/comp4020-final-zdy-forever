@@ -12,7 +12,8 @@ Product principle:
 > shared viewing experience require a vote. Nonresponse is abstention, not consent.
 
 The owner chose 12 members to limit waiting for each person's selection,
-15-second votes to reduce waiting, and one-week expiry so abandoned rooms do
+10-second votes to reduce waiting (15 until Crit 10 classmates found it too
+long; `docs/adr/0016-ten-second-votes.md`), and one-week expiry so abandoned rooms do
 not accumulate while a next-day return still finds the room (it was two hours;
 see `docs/adr/0014-one-week-room-expiry.md`). These are product judgements, not
 experimentally optimised values; do not claim that a rationale alone
@@ -185,12 +186,13 @@ These do not:
 
 Voting rules:
 
-- 15-second window
+- 10-second window (keep the server heartbeat's dead-connection detection
+  inside it; see `docs/adr/0016-ten-second-votes.md`)
 - Resolve immediately once every currently present account has voted, whether
   YES or NO; otherwise wait for the deadline. Keep majority and stale
   reference checks, and cancel the timer after early resolution.
 - YES / NO
-- no response within 15 seconds = ABSTAIN; do not disconnect or remove that member
+- no response within 10 seconds = ABSTAIN; do not disconnect or remove that member
 - ABSTAIN excluded from denominator
 - no minimum turnout: at the deadline, decide by a strict majority of YES/NO votes cast; one YES with no NO passes, zero votes or a tie fails — see `docs/adr/0012-abstention-does-not-block-votes.md`
 - required YES = floor(validVotes / 2) + 1

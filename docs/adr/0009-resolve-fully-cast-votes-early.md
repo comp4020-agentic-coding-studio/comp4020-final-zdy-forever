@@ -1,6 +1,6 @@
 # Resolve votes when everyone has voted
 
-The 15-second voting window is a maximum wait. After each ballot, the server
+The voting window (15 seconds, 10 since [ADR 0016](0016-ten-second-votes.md)) is a maximum wait. After each ballot, the server
 checks its live list of distinct account IDs. If every present account has
 voted YES or NO, tally immediately using the existing strict majority and
 minimum-two-votes rules. The sole-listener request exception remains unchanged.

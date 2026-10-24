@@ -75,7 +75,9 @@ export interface ProposalBroadcast {
   cancelled?: boolean;
 }
 
-export const VOTING_WINDOW_MS = 15_000;
+// 10 seconds since Crit 10 classmates found 15 too long to wait (was 15;
+// docs/adr/0016-ten-second-votes.md).
+export const VOTING_WINDOW_MS = 10_000;
 
 export interface CreateProposalParams {
   proposalId: string;
@@ -121,7 +123,7 @@ export type CastVoteResult = { ok: true; proposal: Proposal } | { ok: false; rea
 // Records `accountId`'s ballot. A second call from the same account replaces
 // their earlier vote rather than adding a second one — "one account gets one
 // vote" means one vote counts per account, not that an account's first vote
-// is locked in forever. Rejects outright once the 15-second window has
+// is locked in forever. Rejects outright once the 10-second window has
 // elapsed, even if resolveProposal hasn't been called yet to flip the state
 // to PASSED/FAILED — the deadline is enforced here independently of that.
 export function castVote(proposal: Proposal, accountId: string, vote: VoteChoice, nowMs: number): CastVoteResult {

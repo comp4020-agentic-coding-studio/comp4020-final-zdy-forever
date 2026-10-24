@@ -31,7 +31,7 @@ import { touchRoomActivity } from "./rooms.ts";
 // Wires the pure voting engine (shared/src/voting.ts) to real playback/queue
 // state and real-time broadcast for PLAY/PAUSE/SKIP/SEEK/REMOVE_QUEUE_ITEM/
 // REORDER_QUEUE. Owns the actual server-side clock: a real setTimeout
-// schedules resolution at expiresAt, so the 15-second window is enforced by
+// schedules resolution at expiresAt, so the 10-second window is enforced by
 // the server regardless of what any client claims about time.
 //
 // Every broadcast carries { proposal, applied } — see ProposalBroadcast in
@@ -222,7 +222,7 @@ export class ProposalManager {
   // order — a drag dropped back onto its original position (or its own
   // current successor) is rejected as NO_OP — and that the track may go
   // there at all (MOVE_NOT_ALLOWED: see queue.ts's placementAllowed), rather
-  // than spending a 15-second vote on an outcome that could only resolve as
+  // than spending a 10-second vote on an outcome that could only resolve as
   // a no-op.
   private requestReorderQueue(
     io: Server,
@@ -455,7 +455,7 @@ export class ProposalManager {
   //
   // Any proposal open against the ending track (most notably a SKIP vote,
   // but a PLAY/PAUSE vote references the same playback too) is invalidated
-  // immediately rather than left to fail on its own 15-second timer: once
+  // immediately rather than left to fail on its own 10-second timer: once
   // the track has moved on, that vote can no longer mean anything, and
   // clients should see it end right away rather than have a "voting..." UI
   // linger for up to 15 more seconds after the track it was about has gone.

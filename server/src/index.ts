@@ -77,13 +77,13 @@ app.use(express.json());
 
 // Socket.IO's defaults (pingInterval 25s, pingTimeout 20s) can take up to 45s
 // to notice a silently-dead connection — long enough that a "ghost" account
-// (gone, but still counted present) can outlive an entire 15-second vote,
+// (gone, but still counted present) can outlive an entire 10-second vote,
 // breaking both the sole-listener fast path and quorum (docs/adr/0010).
-// Tightened so the worst case (~10s) lands well inside that window; a dozen
+// Tightened so the worst case (~8s) lands inside that window; a dozen
 // extra heartbeats per room is negligible, and heartbeat traffic was never
 // counted as room activity anyway (CLAUDE.md's Rooms section).
-const PRESENCE_PING_INTERVAL_MS = 5_000;
-const PRESENCE_PING_TIMEOUT_MS = 5_000;
+const PRESENCE_PING_INTERVAL_MS = 4_000;
+const PRESENCE_PING_TIMEOUT_MS = 4_000;
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, { pingInterval: PRESENCE_PING_INTERVAL_MS, pingTimeout: PRESENCE_PING_TIMEOUT_MS });

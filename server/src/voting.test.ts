@@ -31,10 +31,10 @@ describe("createProposal", () => {
     expect(proposal.payload).toEqual({ type: "SEEK", positionMs: 12_000 });
   });
 
-  it("sets expiresAt to createdAt plus the default 15-second voting window", () => {
+  it("sets expiresAt to createdAt plus the default 10-second voting window", () => {
     const proposal = playbackProposal();
     expect(proposal.expiresAt - proposal.createdAt).toBe(VOTING_WINDOW_MS);
-    expect(proposal.expiresAt).toBe(CREATED_AT + 15_000);
+    expect(proposal.expiresAt).toBe(CREATED_AT + 10_000);
   });
 
   it("honors an explicit votingWindowMs override", () => {
@@ -118,7 +118,7 @@ describe("castVote", () => {
     expect(afterB.proposal.votes).toEqual({ "acct-a": "YES", "acct-b": "NO" });
   });
 
-  it("rejects a vote once the 15-second window has elapsed, even if the proposal is still marked OPEN", () => {
+  it("rejects a vote once the 10-second window has elapsed, even if the proposal is still marked OPEN", () => {
     const proposal = playbackProposal();
     expect(proposal.state).toBe("OPEN");
     const result = castVote(proposal, "acct-a", "YES", proposal.expiresAt);

@@ -4,6 +4,7 @@ import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Account, YoutubeVideoMetadata } from "../../shared/src/types.ts";
+import { VOTING_WINDOW_MS } from "../../shared/src/voting.ts";
 import { registerAccount } from "./accounts.ts";
 import { openDatabase } from "./db.ts";
 import { advanceToNextTrack, ensureCurrentTrack, getCurrentPlayback, getNextTrack, setPlaybackStatus } from "./playback.ts";
@@ -87,7 +88,7 @@ describe("ProposalManager", () => {
       vi.advanceTimersByTime(310_000);
       const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "SKIP", { presentCount: 2 });
       if (!requested.ok) throw new Error(requested.error);
-      vi.advanceTimersByTime(14_999);
+      vi.advanceTimersByTime(VOTING_WINDOW_MS - 1);
       // Simulate the deadline callback waking one millisecond early.
       manager.forceResolve(io, db, roomId);
       expect(manager.getActiveProposal(roomId)?.state).toBe("OPEN");
@@ -100,7 +101,7 @@ describe("ProposalManager", () => {
         proposal: { state: "PASSED" }, applied: true,
       });
       const updateCount = emitted.length;
-      vi.advanceTimersByTime(15_000);
+      vi.advanceTimersByTime(VOTING_WINDOW_MS);
       expect(emitted).toHaveLength(updateCount);
     } finally { manager.dispose(); vi.useRealTimers(); }
   });
@@ -112,7 +113,7 @@ describe("ProposalManager", () => {
     try {
       const requested = manager.requestPlaybackProposal(io, db, roomId, alice.accountId, "SKIP", { presentCount: 3 });
       if (!requested.ok) throw new Error(requested.error);
-      vi.advanceTimersByTime(14_999);
+      vi.advanceTimersByTime(VOTING_WINDOW_MS - 1);
       expect(manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "NO").ok).toBe(true);
       expect(manager.getActiveProposal(roomId)?.state).toBe("OPEN");
       vi.advanceTimersByTime(1);
@@ -136,7 +137,7 @@ describe("ProposalManager", () => {
       expect(getCurrentPlayback(db, roomId)?.status).toBe("PAUSED");
       expect(manager.getActiveProposal(roomId)).toBeNull();
       const updates = emitted.filter((event) => event.event === "playback:update").length;
-      vi.advanceTimersByTime(15_000);
+      vi.advanceTimersByTime(VOTING_WINDOW_MS);
       expect(emitted.filter((event) => event.event === "playback:update")).toHaveLength(updates);
     } finally { manager.dispose(); vi.useRealTimers(); }
   });
@@ -172,7 +173,7 @@ describe("ProposalManager", () => {
       expect(getCurrentPlayback(db, roomId)?.status).toBe("PLAYING");
       expect(emitted.at(-1)?.payload).toMatchObject({ proposal: { state: "FAILED" }, applied: false });
       const count = emitted.length;
-      vi.advanceTimersByTime(15_000);
+      vi.advanceTimersByTime(VOTING_WINDOW_MS);
       expect(emitted).toHaveLength(count);
       expect(manager.castVote(io, db, roomId, requested.proposal.proposalId, bob.accountId, "YES").ok).toBe(false);
     } finally { manager.dispose(); vi.useRealTimers(); }
@@ -232,7 +233,7 @@ describe("ProposalManager", () => {
         expect(emitted.at(-1)?.payload).toMatchObject({ proposal: { state: "FAILED" }, applied: false, cancelled: true });
 
         const count = emitted.length;
-        vi.advanceTimersByTime(15_000);
+        vi.advanceTimersByTime(VOTING_WINDOW_MS);
         expect(emitted).toHaveLength(count); // the 15s timer was cancelled, not merely outrun
 
         // The withdrawn proposal's id can no longer receive ballots.
@@ -272,7 +273,7 @@ describe("ProposalManager", () => {
         });
 
         const count = emitted.length;
-        vi.advanceTimersByTime(15_000);
+        vi.advanceTimersByTime(VOTING_WINDOW_MS);
         expect(emitted).toHaveLength(count);
       } finally { manager.dispose(); vi.useRealTimers(); }
     });
@@ -376,7 +377,7 @@ describe("ProposalManager", () => {
       if (change === "removed") removeQueueItem(db, roomId, target);
       if (change === "started") ensureCurrentTrack(db, roomId, target);
       const before = getCurrentPlayback(db, roomId);
-      vi.advanceTimersByTime(15_000);
+      vi.advanceTimersByTime(VOTING_WINDOW_MS);
       const final = emitted.filter((event) => event.event === "proposal:update").at(-1)!.payload as ProposalBroadcast;
       expect(final.applied).toBe(change === "unchanged");
       if (change === "unchanged") expect(getCurrentPlayback(db, roomId)?.queueItemId).toBe(target);

@@ -39,9 +39,9 @@ interface SocketData {
 }
 
 export interface AttachRealtimeOptions {
-  // Overrides the voting engine's 15-second default. Test-only seam (set by
+  // Overrides the voting engine's 10-second default. Test-only seam (set by
   // the server, never by a client) so integration tests can exercise a full
-  // propose→vote→resolve cycle without a real 15-second wait.
+  // propose→vote→resolve cycle without a real 10-second wait.
   votingWindowMs?: number;
   // How often occupied rooms are checked for having auto-closed (see
   // evictIfClosed); 0 turns the periodic check off. Test-only seam.
@@ -287,7 +287,7 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
     // directly (CLAUDE.md's Authority section). ProposalManager enforces one
     // active proposal per room, rejects a redundant Play-while-playing/
     // Pause-while-paused/remove-the-current-track/no-op-reorder/no-tokens-
-    // left request up front, and owns the real 15-second timer that resolves
+    // left request up front, and owns the real 10-second timer that resolves
     // the vote server-side.
     socket.on(
       "proposal:request",

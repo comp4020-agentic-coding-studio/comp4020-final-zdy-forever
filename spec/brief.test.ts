@@ -87,7 +87,7 @@ describe("the brief: adding never votes, interrupting the room always does", () 
     expect(aliceOpened).toEqual(first);
     expect(first.proposal.state).toBe("OPEN");
     expect(first.applied).toBe(false);
-    expect(first.proposal.expiresAt - first.proposal.createdAt).toBe(15_000);
+    expect(first.proposal.expiresAt - first.proposal.createdAt).toBe(10_000);
 
     // Bob stays connected and can still vote, but sends no ballot. Both
     // clients must receive the same successful result at the deadline.
