@@ -1,6 +1,6 @@
 # Watch YouTube Together
 
-[Open the app](https://comp4020-final-zdy-forever.fly.dev/), choose a display name, then create a room or join with a friend's link or room number. Paste a YouTube link to add a video. Share the room link so friends can join, watch and chat together. No password or YouTube API key is required.
+[Open the app](https://comp4020-final-zdy-forever.fly.dev/), choose a display name, then create a room or join with a friend's link or room number. Paste a YouTube link to add a video, and share the room link with friends. No password or account setup is needed.
 
 ## What good means here
 
@@ -10,17 +10,17 @@ Two readings sharpened this. Clay Shirky's [*Situated Software*](https://gwern.n
 
 ## Free contributions, shared interruptions
 
-Anyone can add videos and chat without permission. Adding to the queue lets each person contribute an idea; Pause or Skip changes what others are experiencing, so playback controls require voting. Play, Pause, Skip, Seek, Remove and Reorder follow this rule. Only the current DJ can propose Seek.
+This is a balance between freedom and respect. Adding a video you want to watch is free expression: it takes nothing from anyone. Pausing or skipping interrupts everyone else's viewing, so it needs the group's agreement. Play, Pause, Skip, Seek, Remove and Reorder therefore require a vote; adding and chatting never do. Only the current DJ can propose Seek.
 
-A vote lasts up to 15 seconds. YES and NO count; nonresponses abstain. A strict majority of votes cast passes, ties fail, and one YES with no NO passes at the deadline. A sole listener acts immediately; otherwise early resolution requires everyone present to vote. Abstaining leaves you in the room. The cost is deliberate: silence does not veto another person's request, so someone who objects must respond.
+Existing watch-together tools choose one side. Watch2Gether by default lets [all users "interact with the player (play/pause)"](https://community.w2g.tv/t/how-to-use-watch2gether/736): anyone can interrupt anyone. Its owner can restrict the player to moderators, and Teleparty's host can choose ["Only I have control"](https://www.howtogeek.com/you-can-use-teleparty-to-create-a-watch-party-with-any-streaming-service/): then one person decides for everyone. I wanted neither a free-for-all nor a host: everyone keeps an equal voice, and nobody interrupts alone.
 
-A Ctrl-held ping wheel, modelled on League of Legends' ping wheel, sends a quick, rate-limited signal to everyone without typing or voting, since it changes nobody's playback. Click confetti is a purely local flourish.
+A vote lasts up to 15 seconds. YES and NO count; nonresponses abstain. A strict majority of votes cast passes and ties fail, so one YES with no NO passes. The cost is deliberate: silence does not veto another person's request, so someone who objects must respond ([verified on the deployment](https://github.com/comp4020-agentic-coding-studio/comp4020-final-zdy-forever/blob/main/docs/evidence/2026-10-11/README.md)).
 
-**Verification, 11 October 2026:** the earlier deployment rejected a lone YES when another connected member abstained; after the fix, an agent-run check kept that member idle for 310 seconds and Skip passed at the deadline. The [verification record](https://github.com/comp4020-agentic-coding-studio/comp4020-final-zdy-forever/blob/main/docs/evidence/2026-10-11/README.md) distinguishes the before and after results.
+A Ctrl-held ping wheel, modelled on League of Legends' ping wheel, sends a quick, rate-limited signal to everyone without typing or voting, since it changes nobody's playback.
 
 ## Small rooms with a limited lifetime
 
-I chose 12 people because larger groups make everyone wait longer for their selection. I chose 15 seconds to keep votes brief. These are design judgements, not values established by a user study.
+I chose 12 people because larger groups make everyone wait longer for their own video to come up. 15 seconds keeps votes brief. These are design judgements, not values from a user study.
 
 Rooms close after a week without meaningful activity. I first chose two hours for one-off gatherings, but then a room was always gone by the next day, so returning friends found nothing ([ADR 0014](https://github.com/comp4020-agentic-coding-studio/comp4020-final-zdy-forever/blob/main/docs/adr/0014-one-week-room-expiry.md)). A week covers a return visit while abandoned rooms still disappear. SQLite keeps queue, playback position and chat across refreshes, restarts and redeploys; closure deletes the chat.
 
