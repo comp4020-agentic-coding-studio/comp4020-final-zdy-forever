@@ -76,7 +76,7 @@ against the deployment (release with commit `b176ed3`). 22/22 passed:
 
 Early failures were the script's own faults, not the app's: tabbing before
 the socket connected, too few tracks for a move to be legal, and, on a rerun
-against the final deployment (commit `e3b0c4a`'s successor), a 19-second
+against the final deployment (commit `b3568b1`), a 19-second
 first video that headless Chrome actually played to the end, so playback
 correctly became empty and the queue showed "restart here" instead of Pause.
 The script now starts with a ten-minute video and passed 22/22 again on the
