@@ -1,0 +1,27 @@
+import { chromium } from "playwright-core";
+const URL = "https://comp4020-final-zdy-forever.fly.dev/";
+const b = await chromium.launch({ channel: "chrome", headless: true });
+const A = await (await b.newContext({ viewport: { width: 1920, height: 1080 } })).newPage();
+const B = await (await b.newContext({ viewport: { width: 390, height: 844 }, isMobile: true })).newPage();
+async function reg(p, n) { await p.goto(URL); await p.getByLabel("display name", { exact: true }).fill(n); await p.getByRole("button", { name: "Let's go" }).click(); await p.waitForFunction(() => !document.querySelector("button.btn--green[disabled]")); }
+await reg(A, "Voter A"); await reg(B, "Quiet B");
+await A.getByLabel("room name").fill("ten second vote");
+await A.getByText("Private — join with a 6-digit code").click();
+await A.getByRole("button", { name: /Create room/ }).click();
+const chip = A.locator('[aria-label^="private room code"]'); await chip.waitFor();
+const code = (await chip.getAttribute("aria-label")).match(/\d{6}/)[0];
+await B.getByLabel("room code or number").first().fill(code);
+await B.getByRole("button", { name: /Join/ }).first().click();
+await B.getByText("connected", { exact: true }).waitFor();
+await A.getByLabel("YouTube link").fill("https://www.youtube.com/watch?v=aqz-KE-bpKQ");
+await A.getByRole("button", { name: /Add to queue/ }).click();
+await A.getByRole("button", { name: /Propose Pause/ }).waitFor();
+const t = Date.now();
+await A.getByRole("button", { name: /Propose Pause/ }).click();
+await A.getByText(/voting…/).waitFor();
+await A.getByText(/voting…/).waitFor({ state: "detached", timeout: 20_000 });
+const ms = Date.now() - t;
+const result = await A.getByText(/last vote/).innerText().catch(() => "?");
+const bStill = await B.getByText("connected", { exact: true }).isVisible();
+console.log(`B connected, never voted. Pause resolved after ${ms} ms: "${result}". B still connected: ${bStill}`);
+await b.close();

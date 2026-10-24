@@ -89,6 +89,14 @@ That gap was fixed in `141982e` with a visible signal button; a follow-up
 browser check sent a signal by touch at 390×844 and by keyboard at 1920×1080,
 and each reached the other profile.
 
+## Ten-second votes (after `6678eaa`)
+
+[`ten-second-vote-check.mjs`](ten-second-vote-check.mjs), on the deployment:
+profile B joined and stayed connected but never voted; A proposed Pause. The
+vote passed after 10,555 ms (10 s window plus round trips), and B was still
+connected afterwards. The two-viewport (18/18), keyboard and resize (22/22),
+signal button and slow-link runs all passed again on the same deployment.
+
 ## Limits
 
 - In the first run, Chrome's network throttling (400 ms latency, 50 kB/s) did
