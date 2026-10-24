@@ -669,7 +669,7 @@ function App() {
             <>
               <p className="sticker sticker--live">
                 {proposal.payload.type === "REPLAY_QUEUE_ITEM"
-                  ? `从「${live.queue.find((item) => proposal.payload.type === "REPLAY_QUEUE_ITEM" && item.queueItemId === proposal.payload.queueItemId)?.title ?? "视频"}」开始重播`
+                  ? `Restart from "${live.queue.find((item) => proposal.payload.type === "REPLAY_QUEUE_ITEM" && item.queueItemId === proposal.payload.queueItemId)?.title ?? "this video"}"`
                   : proposal.type} · voting…
               </p>
               <div className="vote-progress">

@@ -298,11 +298,16 @@ app.post("/api/rooms/join-by-code", (req, res) => {
 });
 
 // Lists a room's queue in stable insertion order. queueItemId, not array
-// position, is each item's identity.
+// position, is each item's identity. Same bar as the logs route below: a
+// presently-admitted member (the live client gets this from room:snapshot
+// anyway), so a public room's lobby-listed roomId isn't a way to watch a
+// room's queue without joining it (docs/adr/0015).
 app.get("/api/rooms/:roomId/queue", (req, res) => {
+  const accountId = authenticateQuery(req, res);
+  if (!accountId) return;
   const { roomId } = req.params;
-  if (!getRoomById(db, roomId)) {
-    res.status(404).json({ error: "room not found" });
+  if (!getRoomById(db, roomId) || !presence.isPresent(roomId, accountId)) {
+    res.status(404).json({ error: "room not found — join it before viewing its queue" });
     return;
   }
   const queue: QueueItem[] = listQueue(db, roomId);
@@ -361,10 +366,13 @@ app.post("/api/rooms/:roomId/queue", async (req, res) => {
 
 // The current track (with its sync anchor), current DJ, and next track — a
 // plain read-only snapshot; the live client gets the same from room:snapshot.
+// Present members only, like the queue route above.
 app.get("/api/rooms/:roomId/playback", (req, res) => {
+  const accountId = authenticateQuery(req, res);
+  if (!accountId) return;
   const { roomId } = req.params;
-  if (!getRoomById(db, roomId)) {
-    res.status(404).json({ error: "room not found" });
+  if (!getRoomById(db, roomId) || !presence.isPresent(roomId, accountId)) {
+    res.status(404).json({ error: "room not found — join it before viewing its playback" });
     return;
   }
   const snapshot: RoomPlaybackSnapshot = {

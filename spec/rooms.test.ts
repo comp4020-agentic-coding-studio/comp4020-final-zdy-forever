@@ -68,6 +68,21 @@ describe("acting as an account over REST", () => {
     expect(status).toBe(404);
   });
 
+  // Regression: a public room's roomId is listed in the lobby, and these
+  // reads used to need nothing else, so anyone could follow a room's queue
+  // and playback without joining (docs/adr/0015).
+  it("only lets someone in the room read its queue and playback", async () => {
+    const alice = await register("Alice");
+    const mallory = await register("Mallory");
+    const room = await createRoom(alice, "PUBLIC");
+
+    for (const path of [`/api/rooms/${room.roomId}/queue`, `/api/rooms/${room.roomId}/playback`]) {
+      expect((await get(path, {})).status).toBe(401);
+      expect((await get(path, { accountId: alice.accountId, clientId: mallory.clientId })).status).toBe(401);
+      expect((await get(path, mallory)).status).toBe(404);
+    }
+  });
+
   it("requires the clientId that registered the account to read a room's logs too", async () => {
     const alice = await register("Alice");
     const mallory = await register("Mallory");

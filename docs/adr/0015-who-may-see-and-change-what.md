@@ -30,6 +30,7 @@ socket handshake and every authenticated REST call looks up the account by
 | Choose the DJ successor | the departing DJ, among present accounts | `DjHandoffManager` |
 | Read chat | accounts currently present | chat is sent only to the room's sockets |
 | Read a room's log inside the room | accounts currently present | `GET /api/rooms/:roomId/logs` |
+| Read a room's queue and playback | accounts currently present | `room:snapshot`; `GET /api/rooms/:roomId/queue`, `/playback` |
 | Read a room's log before joining | any account that knows its code/number | `GET /api/rooms/logs` |
 | Rename | the account itself | `POST /api/account/name` |
 
@@ -49,11 +50,12 @@ clearing browser storage loses the account.
 
 ## Known limits
 
-- Anyone who knows a room's internal `roomId` (a random UUID: listed in the
-  lobby for public rooms, otherwise seen only by members) can read its queue and playback through `GET
-  /api/rooms/:roomId/queue` and `/playback` without joining. These contain only
-  video IDs and accountIds, not chat. This was left as is rather than added
-  late; it is not an adversarial audit.
+- Writing this table exposed one gap: `GET /api/rooms/:roomId/queue` and
+  `/playback` needed only a `roomId`, which the lobby lists for public rooms,
+  so anyone could follow a room without joining. Both now require an
+  authenticated, present member, like the in-room log route; the client never
+  used them (it reads `room:snapshot`). A regression check is in
+  `spec/rooms.test.ts`. This review is not an adversarial audit.
 - Possession of the `clientId` is the whole credential. Another person on the
   same browser profile is the same account.
 - The pre-join log viewer shows who did what to anyone with the code. Logs never
