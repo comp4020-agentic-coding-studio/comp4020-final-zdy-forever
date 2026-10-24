@@ -3,7 +3,7 @@
 ## Goal
 
 Watch YouTube Together is a real-time shared viewing room for up to 12 users.
-Open-room state is persistent; rooms close after two hours of inactivity and
+Open-room state is persistent; rooms close after seven days of inactivity and
 closure deletes their chat. Do not describe this as unlimited shared memory.
 
 Product principle:
@@ -12,10 +12,11 @@ Product principle:
 > shared viewing experience require a vote. Nonresponse is abstention, not consent.
 
 The owner chose 12 members to limit waiting for each person's selection,
-15-second votes to reduce waiting, and two-hour expiry for one-off gatherings.
-These are product judgements, not experimentally optimised values. Check their
-consequences against the course brief, including next-day persistence; do not
-claim that a rationale alone establishes compliance.
+15-second votes to reduce waiting, and one-week expiry so abandoned rooms do
+not accumulate while a next-day return still finds the room (it was two hours;
+see `docs/adr/0014-one-week-room-expiry.md`). These are product judgements, not
+experimentally optimised values; do not claim that a rationale alone
+establishes compliance.
 
 Do not add unrelated features or over-engineer.
 
@@ -86,7 +87,7 @@ Private codes, and public room numbers, must each be checked for active collisio
 
 Sharing a room (a copyable link, or the native share sheet) carries its code/number, and opening it joins automatically — a first-time visitor registers a name first, then joins the moment they do. Knowing the code/number at all is already everything a manual join requires, so this gives away nothing a typed-in code wouldn't.
 
-Every room automatically closes after 2 hours of inactivity. This is mandatory,
+Every room automatically closes after 7 days of inactivity. This is mandatory,
 including legacy rooms; there is no creation-form toggle or client opt-out.
 
 Heartbeat/network traffic does not count as activity.

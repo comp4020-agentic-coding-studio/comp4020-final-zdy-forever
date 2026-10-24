@@ -226,7 +226,7 @@ export function usePlaybackSync(
       setState((s) => ({ ...s, connected: false, joinError: error }));
     });
 
-    // The room auto-closed (2 hours with no activity) and the server has
+    // The room auto-closed (7 days with no activity) and the server has
     // already let this socket go — reported like a failed join, since either
     // way this client is no longer in the room.
     socket.on("room:closed", () => {

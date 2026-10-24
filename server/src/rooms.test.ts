@@ -343,7 +343,7 @@ describe("rooms", () => {
     expect(listPublicLobby(db, () => MAX_ROOM_USERS - 1)[0]).toMatchObject({ roomId: room.roomId, joinable: true });
   });
 
-  // CLAUDE.md's Rooms section: "auto close after 2 hours of inactivity,"
+  // CLAUDE.md's Rooms section: "auto close after 7 days of inactivity,"
   // restart-safe, using timestamps rather than in-memory timers — every test
   // here drives the clock with an explicit nowMs rather than a real timer.
   describe("auto-close inactivity", () => {

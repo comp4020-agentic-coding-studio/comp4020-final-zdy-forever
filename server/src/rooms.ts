@@ -11,8 +11,9 @@ export class RoomClosedError extends Error {}
 // the persisted membership below.
 export const MAX_ROOM_USERS = 12;
 
-// CLAUDE.md's Rooms section: "closure after 2 hours of inactivity."
-export const AUTO_CLOSE_INACTIVITY_MS = 2 * 60 * 60 * 1000;
+// CLAUDE.md's Rooms section: "closure after 7 days of inactivity" (was 2
+// hours; see docs/adr/0014-one-week-room-expiry.md).
+export const AUTO_CLOSE_INACTIVITY_MS = 7 * 24 * 60 * 60 * 1000;
 
 function randomSixDigitCode(): string {
   return String(randomInt(1_000_000)).padStart(6, "0");
@@ -143,7 +144,7 @@ function rowToRoom(row: unknown): Room {
   };
 }
 
-// Sweeps for auto-close inactivity before reading, so a room whose 2-hour
+// Sweeps for auto-close inactivity before reading, so a room whose 7-day
 // window has elapsed reports closed: true here even if nothing had touched
 // it since — the very first read after expiry is what persists the closure.
 export function getRoomById(db: DatabaseSync, roomId: string, nowMs: number = Date.now()): Room | undefined {

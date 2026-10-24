@@ -1,6 +1,7 @@
 # Mandatory room expiry and DJ departure handoff
 
-All rooms close after two hours without meaningful activity. Ignore the legacy
+All rooms close after a period without meaningful activity (originally two
+hours; seven days since [ADR 0014](0014-one-week-room-expiry.md)). Ignore the legacy
 creation flag and migrate existing rooms to enabled; timestamp-based sweeps
 also cover legacy rows whose flag is still false. Chat deletion on closure is
 unchanged.

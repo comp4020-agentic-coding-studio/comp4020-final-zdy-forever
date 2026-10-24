@@ -152,7 +152,7 @@ export function attachRealtime(io: Server, db: DatabaseSync, options: AttachReal
     }
   }
 
-  // A room auto-closes once 2 hours pass with no meaningful activity,
+  // A room auto-closes once 7 days pass with no meaningful activity,
   // decided from its stored timestamp whenever something reads it (see
   // rooms.ts's sweep). People can still be in it then — just listening isn't
   // activity — and they used to stay, still voting and chatting in a room

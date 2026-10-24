@@ -17,4 +17,4 @@ Confirmed by the student in the documentation review conversation on 11 October 
 | Telegram bot and developer role. | Student reports delegating code logic and retaining engineering choices and copy changes. Their expectation about manual coding being reserved for very complex projects is a personal prediction. |
 | Research reading. | Sources were found by agents. At this review the student had not read them. The revised note uses agent-checked abstracts and practitioner articles; it must not imply completed student reading. |
 
-The [11 October evidence bundle](2026-10-11/README.md) distinguishes deployed observations from subsequent local checks. See [submission status](../submission-status.md) for missing activities and sources to read.
+The [11 October evidence bundle](2026-10-11/README.md) distinguishes deployed observations from subsequent local checks.

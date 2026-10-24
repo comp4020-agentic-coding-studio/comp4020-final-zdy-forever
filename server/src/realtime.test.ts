@@ -1500,7 +1500,7 @@ describe("realtime room closure", () => {
     return socket;
   }
 
-  // Backdates the room's last activity past the 2-hour window, as if
+  // Backdates the room's last activity past the 7-day window, as if
   // everyone had just been listening all that time.
   function goQuiet(): void {
     const longAgo = new Date(Date.now() - AUTO_CLOSE_INACTIVITY_MS - 60_000).toISOString();
