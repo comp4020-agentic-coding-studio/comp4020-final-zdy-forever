@@ -16,6 +16,6 @@ Confirmed by the student in the documentation review conversation on 11 October 
 | “17 times faster.” | Earlier agent report; no retained benchmark output or independent reproduction found in this review. Never describe it as the student's measurement or proof of playback improvement. |
 | Telegram bot and developer role. | Student reports delegating code logic and retaining engineering choices and copy changes. Their expectation about manual coding being reserved for very complex projects is a personal prediction. |
 | League of Legends ping wheel. | Student account: the ping wheel was modelled on League of Legends' ping interaction; the three lighter features have since been tried by the student on the deployment. |
-| Research reading. | Sources were found by agents. At this review the student had not read them. The revised note uses agent-checked abstracts and practitioner articles; it must not imply completed student reading. |
+| Research reading. | Sources were found by agents. On 11 October 2026 the student had not yet read them; on 24 October 2026 the student reported having read them. The student's own objection to Balepur et al.'s no-agent extension task (if agents are permitted, why measure working without them?) shaped the revised section; the agent checked the paper's stated justifications and the Cihan et al. figures against the arXiv pages. |
 
 The [11 October evidence bundle](2026-10-11/README.md) distinguishes deployed observations from subsequent local checks.
